@@ -2,16 +2,20 @@
 # escrita de conteudo, diretorios, links simbolicos e resolucao de
 # caminhos absolutos/relativos.
 #
-# Sobre permissoes: o i-node guarda o campo (dono/outros - rwx), que é
-# exigido pela estrutura do enunciado, mas nenhuma operacao aqui verifica
-# isso. O controle de acesso em si fica pro trabalho de Seguranca de SO do
-# proximo bimestre (ver README).
+# Esta classe faz o papel do kernel: guarda quem esta usando o sistema
+# agora (self.uid/self.gid, como as credenciais de um processo no Linux) e
+# carimba dono, grupo e permissoes em todo i-node criado. As contas de
+# usuarios e grupos ficam em accounts.py. O controle de acesso das
+# operacoes de arquivo (conferir r/w antes de ler/escrever) ainda nao e
+# aplicado aqui.
 
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from typing import Dict, Iterator, List, Optional, Tuple
 
+from fs.accounts import Accounts
 from fs.bitmap import Bitmap
 from fs.constants import (
     BLOCK_BITMAP_BLOCKS,
@@ -32,25 +36,42 @@ from fs.constants import (
     INODE_TABLE_START,
     MAX_NAME_LEN,
     NUM_INODES,
+    OLD_SUPERBLOCK_MAGIC,
+    PERM_600,
+    PERM_644,
     RESERVED_BLOCKS,
+    ROOT_GID,
     ROOT_INODE,
+    ROOT_UID,
     TOTAL_BLOCKS,
     TYPE_DIR,
     TYPE_FILE,
     TYPE_SYMLINK,
 )
 from fs.disk import Disk
+from fs.errors import FSError
 from fs.structs import DirEntry, Inode, SuperBlock
 
-
-class FSError(Exception):
-    """Erro de operacao do sistema de arquivos (mostrado ao usuario no shell)."""
+# estrutura criada na formatacao (alem da raiz, que e 644): /etc e /home
+# todos podem ler e atravessar, mas so o root cria coisas dentro; /root e a
+# home do root, fechada como as dos outros usuarios
+INITIAL_DIRS = (("/etc", PERM_644), ("/home", PERM_644), ("/root", PERM_600))
 
 
 class FileSystem:
-    def __init__(self, path: str, current_user: str):
+    def __init__(self, path: str, root_password: Optional[str] = None):
+        """Monta o disco em `path`. Se o arquivo nao existir, cria e formata
+        um disco novo, e para isso precisa da senha do root."""
         self.path = path
-        self.current_user = current_user
+
+        # credenciais de quem esta usando o sistema agora. Comeca como root
+        # so pra montar/formatar; o login troca para o usuario que entrou.
+        self.uid = ROOT_UID
+        self.gid = ROOT_GID
+        self.accounts = Accounts(self)
+        # a formatacao ja cria diretorios e a montagem ja le /etc, e os dois
+        # resolvem caminhos, que precisam de um diretorio atual
+        self.cwd_inode = ROOT_INODE
 
         # cache em memoria do conteudo de diretorios ja lidos nesta sessao:
         # dir_inode -> {nome: (i-node, bloco, slot)}, mais a lista de slots
@@ -63,16 +84,24 @@ class FileSystem:
         self._dir_free_slots: Dict[int, List[Tuple[int, int]]] = {}
 
         if not Disk.exists(path):
+            if root_password is None:
+                raise FSError(f"'{path}' não existe e nenhuma senha de root foi dada para formatar")
+            Accounts.check_password(root_password)  # antes de criar o arquivo de 128 MB
             Disk.create(path)
             self.disk = Disk(path)
-            self._mkfs()
+            self._mkfs(root_password)
         else:
             self.disk = Disk(path)
-            self._mount()
+            try:
+                self._mount()
+            except FSError:
+                self.disk.close()  # nao deixa o arquivo preso (no Windows nao daria pra renomear)
+                raise
+            self.accounts.load()
 
         self.cwd_inode = self.sb.root_inode
 
-    def _mkfs(self) -> None:
+    def _mkfs(self, root_password: str) -> None:
         self.sb = SuperBlock(
             block_size=BLOCK_SIZE,
             total_blocks=TOTAL_BLOCKS,
@@ -106,17 +135,27 @@ class FileSystem:
         assert root_num == ROOT_INODE
         now = time.time()
         root = Inode(
-            used=1, type=TYPE_DIR, perm=DEFAULT_DIR_PERM,
-            name="/", creator=self.current_user, owner=self.current_user,
+            used=1, type=TYPE_DIR, perm=PERM_644,
+            name="/", owner_uid=ROOT_UID, gid=ROOT_GID, creator_uid=ROOT_UID,
             size=0, created_at=now, modified_at=now,
         )
         self.write_inode(root_num, root)
         self.add_dir_entry(root_num, ".", root_num, _validate=False)
         self.add_dir_entry(root_num, "..", root_num, _validate=False)
+
+        # o resto e criado como root (self.uid/gid ainda sao do root aqui)
+        for dir_path, perm in INITIAL_DIRS:
+            self.set_attrs(self.mkdir(dir_path), perm=perm)
+        self.accounts.initialize(root_password)
         self.disk.flush()
 
     def _mount(self) -> None:
         sb_block = self.disk.read_block(0)
+        if sb_block[:len(OLD_SUPERBLOCK_MAGIC)] == OLD_SUPERBLOCK_MAGIC:
+            raise FSError(
+                f"'{self.path}' está no formato antigo (sem usuários e permissões) e não "
+                "pode ser montado. Renomeie ou apague esse arquivo para criar um disco novo."
+            )
         try:
             self.sb = SuperBlock.unpack(sb_block)
         except ValueError as exc:
@@ -192,6 +231,42 @@ class FileSystem:
 
     def flush(self) -> None:
         self.disk.flush()
+
+    # ---- credenciais ----
+
+    def set_credentials(self, uid: int, gid: int) -> None:
+        """Troca quem esta usando o sistema (login, su)."""
+        self.uid = uid
+        self.gid = gid
+
+    @contextmanager
+    def as_root(self) -> Iterator[None]:
+        """Modo kernel: roda um trecho com as credenciais do root e depois
+        devolve as originais, mesmo se der erro no meio (finally).
+
+        Usado so por codigo do proprio sistema que precisa mexer em arquivos
+        protegidos -- ex.: o login lendo o /etc/shadow, o useradd gravando
+        nos arquivos de /etc. Nenhum comando digitado no shell entra aqui.
+        """
+        saved = (self.uid, self.gid)
+        self.uid, self.gid = ROOT_UID, ROOT_GID
+        try:
+            yield
+        finally:
+            self.uid, self.gid = saved
+
+    def set_attrs(self, num: int, owner_uid: Optional[int] = None,
+                  gid: Optional[int] = None, perm: Optional[int] = None) -> None:
+        """Altera dono, grupo e/ou permissoes de um i-node, sem checagem
+        nenhuma (uso interno do kernel)."""
+        inode = self.read_inode(num)
+        if owner_uid is not None:
+            inode.owner_uid = owner_uid
+        if gid is not None:
+            inode.gid = gid
+        if perm is not None:
+            inode.perm = perm
+        self.write_inode(num, inode)
 
     # aloca/libera i-nodes e blocos usando os bitmaps
     def alloc_inode(self) -> int:
@@ -569,17 +644,6 @@ class FileSystem:
         self.disk.write_block(block_num, bytes(data))
         entries[name] = (target_inode_num, block_num, slot_idx)
 
-    # so formata o campo perm do i-node pra exibicao (ls/stat) -- sem
-    # checagem nenhuma, ver comentario la em cima do arquivo
-    @staticmethod
-    def perm_string(perm: int, itype: int) -> str:
-        t = {TYPE_FILE: "-", TYPE_DIR: "d", TYPE_SYMLINK: "l"}.get(itype, "?")
-        chars = ""
-        for shift in (5, 4, 3, 2, 1, 0):
-            bit = (perm >> shift) & 1
-            chars += ("rwx"[2 - (shift % 3)]) if bit else "-"
-        return t + chars
-
     @staticmethod
     def _check_name(name: str) -> None:
         if name in ("", ".", ".."):
@@ -681,6 +745,16 @@ class FileSystem:
             cur = entries.get("..", self.sb.root_inode)
         return maybe_ancestor == self.sb.root_inode
 
+    def _new_inode(self, itype: int, perm: int, name: str, now: float) -> Inode:
+        # quem cria vira dono e criador; o grupo e o grupo primario de quem
+        # cria (regra do Linux) -- com o grupo proprio de cada usuario, o
+        # arquivo nasce acessivel so a ele mesmo pelo grupo
+        return Inode(
+            used=1, type=itype, perm=perm, name=name,
+            owner_uid=self.uid, gid=self.gid, creator_uid=self.uid,
+            size=0, created_at=now, modified_at=now,
+        )
+
     # ---- operacoes sobre arquivos ----
 
     def touch(self, path: str) -> int:
@@ -695,11 +769,7 @@ class FileSystem:
         self._check_name(name)  # valida antes de gastar i-node
         num = self.alloc_inode()
         now = time.time()
-        inode = Inode(
-            used=1, type=TYPE_FILE, perm=DEFAULT_FILE_PERM,
-            name=name, creator=self.current_user, owner=self.current_user,
-            size=0, created_at=now, modified_at=now,
-        )
+        inode = self._new_inode(TYPE_FILE, DEFAULT_FILE_PERM, name, now)
         self.write_inode(num, inode)
         try:
             self.add_dir_entry(parent, name, num)
@@ -808,11 +878,7 @@ class FileSystem:
         self._check_name(name)
         num = self.alloc_inode()
         now = time.time()
-        inode = Inode(
-            used=1, type=TYPE_SYMLINK, perm=DEFAULT_SYMLINK_PERM,
-            name=name, creator=self.current_user, owner=self.current_user,
-            size=0, created_at=now, modified_at=now,
-        )
+        inode = self._new_inode(TYPE_SYMLINK, DEFAULT_SYMLINK_PERM, name, now)
         self.write_inode(num, inode)
         try:
             self.write_data(num, target.encode("utf-8"))
@@ -832,11 +898,7 @@ class FileSystem:
         self._check_name(name)
         num = self.alloc_inode()
         now = time.time()
-        inode = Inode(
-            used=1, type=TYPE_DIR, perm=DEFAULT_DIR_PERM,
-            name=name, creator=self.current_user, owner=self.current_user,
-            size=0, created_at=now, modified_at=now,
-        )
+        inode = self._new_inode(TYPE_DIR, DEFAULT_DIR_PERM, name, now)
         self.write_inode(num, inode)
         try:
             # monta o diretorio novo por inteiro e so depois o "pendura" no pai

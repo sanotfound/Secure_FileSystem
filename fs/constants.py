@@ -17,15 +17,18 @@ assert TOTAL_BLOCKS * BLOCK_SIZE == DISK_SIZE
 # i-node de tamanho fixo, potencia de 2 (128B). 8 ponteiros diretos cobrem
 # 16KB por i-node; passou disso, encadeia em outro i-node via next_inode.
 DIRECT_POINTERS = 8
-INODE_FORMAT = "<BBBB32s16s16sQdd8Ii"
-# used(B) type(B) perm(B) reservado(B) name(32s) creator(16s) owner(16s)
-# size(Q) created_at(d) modified_at(d) pointers(8I) next_inode(i)
+INODE_FORMAT = "<BBBB32sIII20sQdd8Ii"
+# used(B) type(B) perm(B) reservado(B) name(32s) owner_uid(I) gid(I)
+# creator_uid(I) reservado(20s) size(Q) created_at(d) modified_at(d)
+# pointers(8I) next_inode(i)
+# dono e criador eram nomes de 16B cada; viraram numeros (UID/GID, como no
+# Linux) e os 20B que sobraram ficam reservados, mantendo os 128B
 INODE_SIZE = struct.calcsize(INODE_FORMAT)
 assert INODE_SIZE == 128, INODE_SIZE
 assert (INODE_SIZE & (INODE_SIZE - 1)) == 0, "i-node precisa ter tamanho potencia de 2"
 
 MAX_NAME_LEN = 27  # cabe com folga em name[32] e no dirent
-MAX_USER_LEN = 15
+MAX_USER_LEN = 15  # nomes de usuario e de grupo
 
 NUM_INODES = 8192  # da pra sobra pra qualquer teste, gasta so 1MB de tabela
 INODE_TABLE_BYTES = NUM_INODES * INODE_SIZE
@@ -36,11 +39,40 @@ TYPE_FILE = 0
 TYPE_DIR = 1
 TYPE_SYMLINK = 2
 
-# byte de permissao: 3 bits dono (rwx) + 3 bits outros (rwx)
-PERM_R, PERM_W, PERM_X = 0b100, 0b010, 0b001
-DEFAULT_FILE_PERM = (PERM_R | PERM_W) << 3 | PERM_R                     # rw-r--
-DEFAULT_DIR_PERM = (PERM_R | PERM_W | PERM_X) << 3 | (PERM_R | PERM_X)  # rwxr-x
-DEFAULT_SYMLINK_PERM = (PERM_R | PERM_W | PERM_X) << 3 | (PERM_R | PERM_W | PERM_X)
+# byte de permissao: 2 bits (r, w) para cada classe -- dono, grupo e
+# outros, nessa ordem a partir do bit mais alto: 00 rw rw rw. Nao existe x:
+# so ha arquivos de texto, e atravessar diretorio e controlado pelo r.
+# Os nomes PERM_644 etc. seguem os numeros do chmod (r=4, w=2).
+PERM_R, PERM_W = 0b10, 0b01
+PERM_RW = PERM_R | PERM_W
+SHIFT_OWNER, SHIFT_GROUP, SHIFT_OTHER = 4, 2, 0
+PERM_644 = PERM_RW << SHIFT_OWNER | PERM_R << SHIFT_GROUP | PERM_R << SHIFT_OTHER   # rwr-r-
+PERM_640 = PERM_RW << SHIFT_OWNER | PERM_R << SHIFT_GROUP                           # rwr---
+PERM_600 = PERM_RW << SHIFT_OWNER                                                   # rw----
+PERM_666 = PERM_RW << SHIFT_OWNER | PERM_RW << SHIFT_GROUP | PERM_RW << SHIFT_OTHER  # rwrwrw
+DEFAULT_FILE_PERM = PERM_640
+DEFAULT_DIR_PERM = PERM_640
+DEFAULT_SYMLINK_PERM = PERM_666  # so exibicao: link usa a permissao do alvo
+
+# usuarios e grupos (numeros iguais aos do Linux/Ubuntu)
+ROOT_UID = 0
+ROOT_GID = 0
+SUDO_GID = 27
+FIRST_ID = 1000  # UIDs/GIDs de usuarios e grupos comuns comecam aqui
+
+# arquivos de contas, dentro do proprio sistema de arquivos
+PASSWD_PATH = "/etc/passwd"
+SHADOW_PATH = "/etc/shadow"
+GROUP_PATH = "/etc/group"
+SUDOERS_PATH = "/etc/sudoers"
+
+# hash de senha: scrypt com N=2^17, r=8, p=1 (minimo recomendado pela
+# OWASP): cada calculo leva ~0,6 s e usa 128 MiB de memoria
+SCRYPT_LOG2_N = 17
+SCRYPT_R = 8
+SCRYPT_P = 1
+SALT_SIZE = 16
+HASH_SIZE = 32
 
 # entrada de diretorio: nome (28B) + numero do i-node (4B) = 32B, entao
 # cada bloco de 2048B guarda exatamente 64 entradas
@@ -51,7 +83,8 @@ ENTRIES_PER_BLOCK = BLOCK_SIZE // DIRENT_SIZE
 assert ENTRIES_PER_BLOCK * DIRENT_SIZE == BLOCK_SIZE
 EMPTY_ENTRY = 0xFFFFFFFF  # marca slot de diretorio livre
 
-SUPERBLOCK_MAGIC = b"SOFS"
+SUPERBLOCK_MAGIC = b"SOF2"      # versao com usuarios e permissoes
+OLD_SUPERBLOCK_MAGIC = b"SOFS"  # versao anterior, sem usuarios: nao e montada
 SUPERBLOCK_FORMAT = "<4s11Id"
 SUPERBLOCK_SIZE = struct.calcsize(SUPERBLOCK_FORMAT)
 assert SUPERBLOCK_SIZE <= BLOCK_SIZE

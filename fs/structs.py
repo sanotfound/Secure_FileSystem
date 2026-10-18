@@ -91,8 +91,9 @@ class Inode:
     type: int = 0
     perm: int = 0
     name: str = ""
-    creator: str = ""
-    owner: str = ""
+    owner_uid: int = 0
+    gid: int = 0
+    creator_uid: int = 0
     size: int = 0
     created_at: float = 0.0
     modified_at: float = 0.0
@@ -110,8 +111,10 @@ class Inode:
             self.perm,
             0,
             _enc(self.name, 32),
-            _enc(self.creator, 16),
-            _enc(self.owner, 16),
+            self.owner_uid,
+            self.gid,
+            self.creator_uid,
+            b"",  # reservado (struct completa com zeros)
             self.size,
             self.created_at,
             self.modified_at,
@@ -123,17 +126,18 @@ class Inode:
     def unpack(cls, data: bytes) -> "Inode":
         vals = struct.unpack(INODE_FORMAT, data)
         used, type_, perm, _reserved = vals[0:4]
-        name_b, creator_b, owner_b = vals[4:7]
-        size, created_at, modified_at = vals[7:10]
-        pointers = list(vals[10:10 + DIRECT_POINTERS])
-        next_inode = vals[10 + DIRECT_POINTERS]
+        name_b, owner_uid, gid, creator_uid, _reserved2 = vals[4:9]
+        size, created_at, modified_at = vals[9:12]
+        pointers = list(vals[12:12 + DIRECT_POINTERS])
+        next_inode = vals[12 + DIRECT_POINTERS]
         return cls(
             used=used,
             type=type_,
             perm=perm,
             name=_dec(name_b),
-            creator=_dec(creator_b),
-            owner=_dec(owner_b),
+            owner_uid=owner_uid,
+            gid=gid,
+            creator_uid=creator_uid,
             size=size,
             created_at=created_at,
             modified_at=modified_at,
