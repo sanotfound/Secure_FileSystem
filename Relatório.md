@@ -480,7 +480,7 @@ pode tudo como root (encontrado na revisão da Etapa 5).
 | 3 | `chmod`, `chown` e `chgrp` | concluída |
 | 4 | Grupos (`groupadd`, `usermod -aG`, `gpasswd -d`) e `sudo` | concluída |
 | 5 | README e verificação completa | concluída |
-| 6 | Pasta `tests/` com testes automatizados | planejada |
+| 6 | Pasta `tests/` com testes automatizados | concluída |
 
 ### Etapa 1 — Usuários, senhas e login (concluída)
 
@@ -1340,10 +1340,148 @@ resultados.
 O sistema está completo e documentado. Falta a Etapa 6: a pasta `tests/`
 com testes automatizados que qualquer pessoa possa rodar.
 
-### Etapa 6 (planejada)
+### Etapa 6 — Testes automatizados (concluída)
 
-- **Etapa 6 — Testes automatizados:** pasta `tests/` com testes que qualquer
-  pessoa possa rodar, e instruções no README.
+**Objetivo:** uma pasta `tests/` que qualquer pessoa possa rodar com um
+único comando para conferir que o sistema faz o que este relatório diz,
+sem instalar nada e sem tocar no `disco.img`.
+
+#### Planejamento (anotado antes da implementação)
+
+**Ferramenta: `unittest`, da biblioteca padrão.** Ela mantém o projeto sem
+dependências externas (o `pytest`, mais popular, exigiria
+`pip install`). Para rodar, a partir da pasta do projeto:
+
+```
+python -m unittest -v
+```
+
+Cada teste tem uma descrição em português, que o `-v` mostra na tela.
+
+**Dois problemas de tempo e como serão resolvidos:**
+
+| Problema | Medição | Solução |
+|---|---|---|
+| Cada senha custa ~0,6 s no scrypt real; os testes criam e conferem dezenas de senhas | formatar um disco: 1,15 s com o scrypt real, 0,54 s com o barato | durante os testes, o custo do scrypt cai para N = 2^10 (substituição temporária com `unittest.mock`, sem mudar o código do sistema). Os parâmetros ficam gravados em cada hash, então a verificação continua correta. **Um teste específico** confere o scrypt com os parâmetros reais (N = 2^17, r = 8, p = 1) |
+| Cada teste precisa de um disco limpo, e criar um disco de 128 MB leva tempo | copiar um disco pronto: 0,26 s | um **disco-modelo** é montado uma única vez por execução (formatado, com os usuários ana, bruno e carla) e cada teste recebe uma **cópia** só dele. Um teste nunca interfere em outro |
+
+Os discos de teste ficam numa pasta temporária do sistema operacional,
+apagada no fim. O `disco.img` do projeto nunca é usado.
+
+**Organização da pasta `tests/`:**
+
+| Arquivo | O que testa |
+|---|---|
+| `helpers.py` | base comum: disco-modelo, cópia por teste, scrypt barato, atalhos para "entrar como" um usuário, conferir "Permissão negada", remontar o disco e rodar o shell de verdade |
+| `test_passwords.py` | formato do hash com os parâmetros reais, salt diferente a cada vez, senha errada, bloqueio/desbloqueio, registro corrompido, uso do `compare_digest` |
+| `test_permissions.py` | formato `drwr-r-`, leitura do modo do `chmod` (válidos e inválidos), regra das classes (incluindo os casos exclusivos) |
+| `test_accounts.py` | arquivos de `/etc` e suas permissões, `useradd` (grupo próprio, home, nomes inválidos, "tudo ou nada"), login genérico, `passwd`, bloqueio, `su`, comandos de grupo, releitura após edição manual |
+| `test_access_control.py` | todas as tentativas de usuário comum contra o `/etc/shadow`, homes privadas, atravessar exige `r`, padrões de arquivos novos, pasta compartilhada, classes exclusivas, mudança de grupo na hora, cópia no `cp`, `mv` sem revelar conteúdo, links |
+| `test_chmod_chown.py` | `chmod` numérico e simbólico, quem pode usar cada comando, links, "criador" que não muda, formas do `chown` |
+| `test_sudo.py` | senha, sudoers por nome e por `%grupo`, volta às credenciais (também com erro), `sudo su`, revogação, conta bloqueada |
+| `test_disk.py` | disco antigo recusado sem ser alterado, senha do root obrigatória para formatar, persistência depois de remontar |
+| `test_shell.py` | o programa rodando de verdade: primeira execução, 3 logins errados, a sessão de exemplo do README, prompt e `~`, `ls`/`ls -l`, `help`, Ctrl+C e fim de entrada no meio de comandos |
+
+**Dois níveis de teste:**
+- **testes do kernel**, que chamam `FileSystem` e `Accounts` diretamente.
+  São rápidos e mostram com precisão onde algo quebrou;
+- **testes do shell**, que rodam o `main.py` de verdade com uma lista de
+  comandos (como nas verificações das etapas anteriores). Conferem que o
+  conjunto funciona como um usuário veria.
+
+**O que será alterado:** o `README.md` ganha a seção "Testes" (como rodar,
+quanto tempo leva, o que é testado).
+
+**O que será removido:** nada.
+
+**Por quê:** foi pedido para que qualquer pessoa consiga verificar o
+trabalho sem se perder. Os testes também protegem contra regressões: se
+uma mudança futura quebrar uma regra de segurança, um teste falha. Eles
+reaproveitam os cenários já verificados manualmente nas Etapas 1 a 5.
+
+#### O que foi implementado
+
+**`tests/__init__.py`:** marca a pasta como pacote (o `unittest` do Python
+3.11 só procura testes em pacotes) e explica como rodar.
+
+**`tests/helpers.py`**, a base comum:
+- `fast_scrypt()`: troca temporária do custo do scrypt para N = 2^10 com
+  `unittest.mock.patch`. O código do sistema não muda.
+- `new_disk_copy()`: na primeira chamada, monta o disco-modelo (formatado,
+  com a senha do root e os usuários ana, bruno e carla); em todas as
+  chamadas, devolve uma cópia nova. Tudo fica numa pasta temporária,
+  apagada quando o processo termina.
+- `run_shell(disco, linhas)`: roda o `main.py` num processo separado,
+  mandando as linhas como se alguém digitasse (as senhas também, já que a
+  entrada não é um terminal).
+- `FSTestCase`: classe base dos testes do kernel. Cada teste recebe a sua
+  cópia do disco e começa como root, com estes atalhos:
+  - `become("ana")`: passa a agir como a ana, sem login (o login é testado
+    à parte);
+  - `inode_of` e `read_as_root`: olham qualquer coisa como root;
+  - `remount`: desmonta e monta o disco de novo;
+  - `assertDenied` e `assertNotPermitted`: conferem que a operação falhou
+    com "Permissão negada" ou "Operação não permitida".
+- `assertInOrder`: confere que vários trechos aparecem na saída, um depois
+  do outro.
+
+**Testes (91 no total):**
+
+| Arquivo | Testes | Destaques |
+|---|---|---|
+| `test_passwords.py` | 7 | o único teste com o scrypt real (parâmetros 17/8/1, salt de 16 bytes, hash de 32); a senha nunca aparece no que é guardado; uso do `compare_digest` |
+| `test_permissions.py` | 9 | todas as formas do `chmod` (as mesmas tabelas da Etapa 3); classes exclusivas, incluindo "o dono escreve menos que o grupo" e "todos menos o grupo" |
+| `test_accounts.py` | 24 | permissões dos arquivos de `/etc`; `useradd` tudo ou nada com falha simulada; o login gasta o mesmo scrypt para usuário inexistente; `passwd`, bloqueio, `su`, grupos |
+| `test_access_control.py` | 18 | 9 tentativas contra o `/etc/shadow`; 6 contra uma home privada; pasta compartilhada com `chgrp`; classes exclusivas; mudança de grupo na hora; cópia no `cp` |
+| `test_chmod_chown.py` | 10 | quem pode usar cada comando; modo inválido não altera nada; link muda o alvo; o "criador" não muda |
+| `test_sudo.py` | 11 | senha, sudoers por nome, por `%grupo` e no formato do Linux; credenciais de volta mesmo com erro; `sudo su`; revogação; conta bloqueada; sem sudoers ninguém usa |
+| `test_disk.py` | 4 | i-node de 128 bytes; disco antigo recusado sem ser alterado; senha do root obrigatória; persistência depois de remontar |
+| `test_shell.py` | 8 | primeira execução; 3 logins errados; **a sessão de exemplo do README**; prompt e `~`; mensagens; `help`; disco antigo; Ctrl+C e fim de entrada no meio de comandos |
+
+**`README.md`:** nova seção "Testes" (como rodar, quanto tempo leva, o que
+cada arquivo confere) e a pasta `tests/` no mapa de arquivos.
+
+#### Detalhes definidos durante a implementação
+
+1. **Nomes dos testes em inglês, descrições em português.** Os nomes seguem
+   o padrão do código do projeto (identificadores em inglês). A primeira
+   linha da docstring de cada teste é o que o `-v` mostra, então ela foi
+   escrita em português, explicando o que o teste confere.
+2. **O teste de Ctrl+C roda o shell no próprio processo**, com a função de
+   leitura trocada por uma lista que "aperta" Ctrl+C e "termina a entrada"
+   nos pontos certos. Não dá para enviar Ctrl+C a um processo separado de
+   forma confiável no Windows.
+3. **Um teste confere a sessão de exemplo do README.** Se o README e o
+   programa deixarem de bater, o teste falha.
+
+Não houve mudanças em relação ao planejamento.
+
+#### Testes realizados
+
+- **A suíte completa** (`python -m unittest -v`, da pasta do projeto): 91
+  testes em cerca de 24 segundos, todos passando.
+- **Os testes pegam um sistema quebrado?** Para conferir, o sistema foi
+  estragado de propósito, de quatro jeitos (só na memória, sem alterar
+  nenhum arquivo), e a suíte rodou de novo em cada caso:
+
+  | Sabotagem | Testes que falharam |
+  |---|---|
+  | Nenhuma checagem de permissão (`_require` não faz nada) | 28 |
+  | `sudo` sem conferir o sudoers | 3 |
+  | Classes de permissão somadas em vez de exclusivas | 3 |
+  | Senha guardada em texto puro no shadow | 4 |
+
+  Em todos os casos a suíte acusou o problema, apontando os testes da
+  regra quebrada.
+
+#### Situação ao final da etapa
+
+Todas as etapas estão concluídas. O sistema implementa o que o enunciado
+pede (vários usuários com senha e home, dono e permissões de leitura e
+escrita, `chmod` e `chown`, senhas com hash e arquivo de senhas protegido)
+e vai além com grupos de três classes, `chgrp` e `sudo`. Ele está
+documentado (README e este relatório) e tem testes automatizados que
+qualquer pessoa pode rodar.
 
 ---
 

@@ -133,6 +133,37 @@ Estrutura criada na formatação:
 | `fs/structs.py`, `fs/constants.py` | formatos binários (superbloco, i-node, entrada de diretório) e constantes |
 | `fs/disk.py`, `fs/bitmap.py` | leitura/escrita de blocos e controle de livres/ocupados |
 | `fs/errors.py` | a exceção usada pelo sistema |
+| `tests/` | testes automatizados (ver abaixo) |
+
+## Testes
+
+Da pasta do projeto, sem instalar nada:
+
+```
+python -m unittest -v
+```
+
+São 91 testes, que levam cerca de 25 segundos. Cada um mostra na tela uma
+frase dizendo o que confere. Os discos de teste ficam numa pasta temporária,
+que é apagada no fim; o `disco.img` do projeto nunca é usado.
+
+| Arquivo | O que confere |
+|---|---|
+| `tests/test_passwords.py` | hash scrypt com os parâmetros reais, salt diferente a cada vez, bloqueio de conta |
+| `tests/test_permissions.py` | formato `drwr-r-`, modos do `chmod`, regra dono → grupo → outros |
+| `tests/test_accounts.py` | arquivos de `/etc`, `useradd`, login, `passwd`, `su`, comandos de grupo |
+| `tests/test_access_control.py` | ataques ao `/etc/shadow`, homes privadas, pasta compartilhada, `cp`, links |
+| `tests/test_chmod_chown.py` | quem pode usar `chmod`, `chown` e `chgrp` |
+| `tests/test_sudo.py` | senha, sudoers, volta das credenciais, `sudo su`, revogação |
+| `tests/test_disk.py` | i-node de 128 bytes, disco antigo recusado, persistência |
+| `tests/test_shell.py` | o programa rodando de verdade, incluindo a sessão de exemplo acima |
+
+Para rodar só um arquivo: `python -m unittest -v tests.test_sudo`.
+
+Para os testes não demorarem minutos, o custo do scrypt cai para N = 2^10
+durante a execução (um teste específico confere os parâmetros reais), e cada
+teste recebe a cópia de um disco-modelo já formatado, em vez de formatar um
+disco novo.
 
 ## Layout do disco
 
