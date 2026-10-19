@@ -461,8 +461,8 @@ também é trocado pela home (no bash, `~` entre aspas não seria trocado).
 | 1 | Usuários, senhas e login | concluída |
 | 2 | Controle de acesso (checagem de r/w em todas as operações) | concluída |
 | 3 | `chmod`, `chown` e `chgrp` | concluída |
-| 4 | Grupos (`groupadd`, `usermod -aG`, `gpasswd -d`) e `sudo` | planejada |
-| 5 | README e verificação completa | planejada |
+| 4 | Grupos (`groupadd`, `usermod -aG`, `gpasswd -d`) e `sudo` | concluída |
+| 5 | README e verificação completa | em andamento |
 | 6 | Pasta `tests/` com testes automatizados | planejada |
 
 ### Etapa 1 — Usuários, senhas e login (concluída)
@@ -842,27 +842,6 @@ Os testes da Etapa 1 foram repetidos e continuam passando.
 - Ainda não há comandos para mudar permissões, dono e grupo (Etapa 3) nem
   para criar grupos e usar `sudo` (Etapa 4).
 
-### Ajuste entre as Etapas 2 e 3: comentários no código
-
-**O que mudou:** os comentários e as docstrings escritos nas Etapas 1 e 2
-foram reescritos em tom informal, explicando o raciocínio do jeito que o
-código original do projeto já fazia (por exemplo: "sem isso, ...", "pra
-nao ficar nada pela metade"). Os comentários do código original não foram
-alterados. Arquivos afetados: `accounts.py`, `constants.py`, `errors.py`,
-`filesystem.py`, `passwords.py`, `permissions.py`, `shell.py` e
-`structs.py`.
-
-**Por quê:** comentários informais tornam o raciocínio mais simples e mais
-fácil de qualquer pessoa entender. Esse passa a ser o padrão das próximas
-etapas.
-
-**Como foi garantido que o código não mudou:** antes da revisão foi
-guardada uma cópia de todos os arquivos. Depois, a árvore sintática (AST)
-de cada arquivo foi comparada com a da cópia, ignorando as docstrings
-(comentários com `#` nem entram na AST). Todos os arquivos tiveram AST
-idêntica. Os testes das Etapas 1 e 2 foram repetidos e deram os mesmos
-resultados.
-
 ### Etapa 3 — `chmod`, `chown` e `chgrp` (concluída)
 
 **Objetivo:** dar aos usuários os comandos para mudar permissões, dono e
@@ -1041,13 +1020,241 @@ Os testes das Etapas 1 e 2 foram repetidos e continuam passando.
   os comandos `groupadd`, `usermod -aG` e `gpasswd -d`, e o `sudo`, são da
   Etapa 4.
 
-### Etapas 4 a 6 (planejadas)
+### Etapa 4 — Grupos e `sudo` (concluída)
 
-- **Etapa 4 — Grupos e `sudo`:** `groupadd`, `usermod -aG`, `gpasswd -d`;
-  `sudo` conforme a seção 2.7.
-- **Etapa 5 — Fechamento:** README atualizado e verificação completa
-  (tentativas contra o `/etc/shadow`, pasta compartilhada, sudo, bloqueio de
-  conta).
+**Objetivo:** permitir gerenciar grupos sem editar o `/etc/group` à mão e
+permitir que administradores autorizados executem comandos como root com a
+própria senha (`sudo`), conforme as seções 2.6 e 2.7.
+
+#### Planejamento (anotado antes da implementação)
+
+**O que será implementado em `fs/accounts.py`:**
+
+| Operação | Quem pode | O que faz |
+|---|---|---|
+| `groupadd(nome)` | root | cria o grupo com o primeiro GID livre a partir de 1000 |
+| `add_to_groups(usuário, grupos)` (`usermod -aG`) | root | coloca o usuário em um ou mais grupos (separados por vírgula, como no Linux); confere que todos existem antes de mexer em qualquer um |
+| `remove_from_group(usuário, grupo)` (`gpasswd -d`) | root | tira o usuário do grupo; recusa tirar alguém do próprio grupo primário (ele fica no `/etc/passwd`, não na lista de membros) e avisa se a pessoa não é membro |
+| `can_sudo(usuário)` | — | diz se o usuário está no `/etc/sudoers`, pelo nome ou por um `%grupo` do qual faz parte (inclusive o primário) |
+| `sudo(senha)` | — | confere a senha e o sudoers e roda **um** comando como root (detalhes abaixo) |
+
+Todas as alterações gravam o `/etc/group` pelo mesmo caminho "tudo ou nada"
+da Etapa 1.
+
+**Como o `sudo` vai funcionar:**
+1. O shell pede a senha **do próprio usuário** (`[sudo] senha para ana:`),
+   sempre, sem lembrar de comandos anteriores (seção 2.7). O root não precisa
+   de senha.
+2. O kernel confere a senha (com o mesmo `authenticate` do login, então uma
+   conta bloqueada também não consegue usar o sudo). Senha errada:
+   "sudo: senha incorreta".
+3. Depois confere o `/etc/sudoers` (nessa ordem, como no Linux). Fora dele:
+   "sudo: ana não está no arquivo sudoers".
+4. As credenciais viram as do root só durante aquele comando e voltam a ser
+   as do usuário logo depois, mesmo se o comando der erro.
+
+**Formato do `/etc/sudoers`:** uma entrada por linha; `nome` autoriza um
+usuário, `%grupo` autoriza todos os membros do grupo; linhas vazias e
+começadas por `#` são ignoradas. Só a primeira palavra de cada linha é
+lida, então uma linha no formato do Linux (`ana ALL=(ALL) ALL`) também
+funciona. A formatação já cria a linha `%sudo` (Etapa 1).
+
+**Detalhe definido antes da implementação: `sudo su`.** No Linux,
+`sudo su` é a forma comum de um administrador virar root usando a própria
+senha (sem saber a do root), e `sudo su bruno` vira o bruno. Se o sudo
+simplesmente devolvesse as credenciais antigas ao fim de todo comando, o
+`sudo su` não teria efeito nenhum. Por isso, o kernel vai contar as trocas
+de usuário (login e `su`): se o comando executado com sudo trocou de
+usuário, a troca é mantida; senão, as credenciais voltam a ser as de antes.
+
+**O que será implementado em `fs/filesystem.py`:**
+- contador de trocas de usuário, incrementado pelo `set_credentials` (usado
+  pelo login e pelo `su`) e consultado pelo `sudo`.
+
+**O que será implementado em `fs/shell.py`:**
+- `groupadd <grupo>`;
+- `usermod -aG <grupo[,grupo...]> <usuário>`;
+- `gpasswd -d <usuário> <grupo>`;
+- `sudo <comando> [argumentos]` (o `~` dos argumentos continua sendo a home
+  de quem digitou, como no bash);
+- seção "Grupos e administração" no `help`.
+
+**O que será alterado:** nada do comportamento existente.
+
+**O que será removido:** nada.
+
+**Simplificação em relação ao Linux:** o Linux dá 3 chances para a senha
+do sudo; aqui há uma só, e com senha errada o comando precisa ser digitado
+de novo. Isso evita conferir a senha duas vezes (cada conferência leva
+~0,6 s).
+
+**Por quê:** fecha o modelo de administração decidido na seção 2.7. Os
+administradores usam a própria senha, o root não precisa compartilhar a
+dele, e tirar alguém do grupo `sudo` revoga o acesso na hora. Os comandos de
+grupo tornam usável o modelo de três classes da seção 2.4.
+
+**Testes planejados:**
+- `groupadd`, `usermod -aG` (um e vários grupos) e `gpasswd -d` pelo root;
+  tentativas por usuário comum; grupo inexistente, repetido ou inválido;
+  tirar do grupo primário; tirar quem não é membro;
+- uma mudança de grupo liberando e cortando acesso na hora;
+- `sudo` por quem não está no sudoers (negado depois da senha), com senha
+  errada, por membro do grupo `sudo`, por usuário listado pelo nome, e por
+  conta bloqueada;
+- depois de um comando com `sudo`, o usuário volta a ser ele mesmo (por
+  exemplo, `cat /etc/shadow` volta a ser negado);
+- a senha é pedida em todo `sudo`;
+- `sudo whoami`, `sudo useradd`, `sudo chown`, `sudo cat /etc/shadow`,
+  `sudo su` e `sudo su bruno`;
+- revogação: o root tira a ana do grupo `sudo` e o próximo `sudo` dela é
+  negado.
+
+#### O que foi implementado
+
+**`fs/accounts.py`**
+- `groupadd`: exige root, valida o nome (mesma regra dos nomes de usuário),
+  recusa grupo repetido e usa o primeiro GID livre a partir de 1000.
+- `add_to_groups` (`usermod -aG`): exige root e que o usuário exista;
+  converte **todos** os nomes de grupo antes de alterar qualquer um. Assim,
+  `usermod -aG alunos,naoexiste ana` não deixa a ana só no `alunos`.
+  Acrescentar alguém que já é membro não muda nada.
+- `remove_from_group` (`gpasswd -d`): exige root; recusa o grupo primário
+  da pessoa (ele fica no `/etc/passwd`, e sem ele os arquivos novos dela
+  ficariam sem o grupo próprio); avisa quando a pessoa não é membro.
+- `_sudoers_entries`: lê o `/etc/sudoers` em modo kernel (o arquivo é
+  `-rw----`) e pega a primeira palavra de cada linha que não é vazia nem
+  comentário. Sem o arquivo, ninguém usa sudo.
+- `can_sudo(usuário)`: verdadeiro se o nome do usuário está no sudoers, ou
+  se há um `%grupo` com algum grupo dele (primário ou não).
+- `sudo(senha)`: um gerenciador de contexto (`with ... :`), que funciona em
+  três tempos:
+  1. **Antes do comando:** para quem não é root, confere a senha com o
+     `authenticate` (o mesmo do login; conta bloqueada também falha) e depois
+     o sudoers. Qualquer falha interrompe antes de o comando rodar.
+  2. **Durante o comando:** troca as credenciais para as do root.
+  3. **Depois do comando** (bloco `finally`, então vale mesmo se o comando
+     der erro): devolve as credenciais de antes, a não ser que o próprio
+     comando tenha trocado de usuário (`sudo su`).
+
+**`fs/filesystem.py`**
+- `cred_changes`: contador incrementado a cada `set_credentials` (login e
+  `su`). O `sudo` anota o valor antes do comando; se ele mudou, o comando foi
+  um `su` e a troca de usuário é mantida.
+
+**`fs/shell.py`**
+- `groupadd <grupo>`, `usermod -aG <grupo[,grupo...]> <usuário>` e
+  `gpasswd -d <usuário> <grupo>` (este imprime "Removendo X do grupo Y", como
+  no Linux). O `usermod -G` sem o `-a` (que no Linux substitui todos os
+  grupos) não é aceito.
+- `sudo <comando> [argumentos]`: pede `[sudo] senha para <usuário>:` (o root
+  não digita senha) e executa o comando dentro do `with accounts.sudo(...)`.
+  O comando passa pelo mesmo despachante de sempre, então qualquer comando
+  do shell pode ser usado com `sudo`.
+- Seção "Grupos e administração" no `help`.
+
+#### Detalhes observados durante a implementação
+
+1. **`sudo passwd` troca a senha do root**, porque com `sudo` quem roda o
+   `passwd` é o root. O Linux faz o mesmo; para trocar a senha de outra
+   pessoa, usa-se `sudo passwd <usuário>`.
+2. **Ordem dos GIDs:** como o `groupadd` usa o primeiro GID livre a partir
+   de 1000, um grupo criado antes de um usuário pode ocupar o número que
+   seria o desse usuário. Nesse caso, o grupo próprio do usuário recebe o
+   próximo número livre (regra da seção 2.10). Foi o que aconteceu no teste
+   com a carla, criada depois dos grupos `alunos` (1002) e `professores`
+   (1003).
+3. **Comando inexistente com `sudo`:** `sudo errada` pede a senha e depois
+   responde "comando não reconhecido", como qualquer comando desconhecido.
+
+Não houve mudanças em relação ao planejamento.
+
+#### Testes realizados
+
+Grupos:
+
+| Caso | Resultado |
+|---|---|
+| O root cria `alunos` e `professores`; repete `alunos`; cria `9x` | criados / "já existe" / nome inválido |
+| `usermod -aG alunos,professores ana`, `usermod -aG alunos bruno` | `/etc/group` com os membros; `id ana` mostra os três grupos |
+| `usermod -aG alunos,naoexiste bruno`; `usermod -G alunos bruno` | "grupo não existe" (nada alterado) / mensagem de uso |
+| `gpasswd -d ana professores` duas vezes; `gpasswd -d ana ana`; grupo inexistente | removida / "não é membro" / "grupo primário, não dá pra tirar" / "não existe" |
+| A ana tenta `groupadd`, `usermod -aG sudo ana`, `gpasswd -d bruno alunos` | Permissão negada nos três |
+| O bruno lê um arquivo da ana pelo grupo `alunos`; o root o tira do grupo | a leitura seguinte é negada |
+
+`sudo`:
+
+| Caso | Resultado |
+|---|---|
+| O bruno (fora do sudoers) com a senha certa / errada; `sudo` sem comando | "não está no arquivo sudoers" / "senha incorreta" / uso |
+| O root faz `usermod -aG sudo ana`; a ana roda `cat /etc/shadow` sem e com `sudo` | negado / mostra o shadow |
+| Depois do `sudo`: `whoami` e `cat /etc/shadow` | `ana` / negado de novo (o privilégio não fica) |
+| `sudo whoami`; `sudo cat /etc/sudoers`; `sudo useradd carla`; `sudo chown bruno ~/meu.txt` | `root` / mostra o arquivo / cria a carla / dono vira bruno |
+| `sudo` da ana com a senha errada | "senha incorreta" |
+| `sudo su bruno`; `sudo su` | vira bruno / vira root (e lê o shadow) |
+| O root tira a ana do grupo `sudo`; ela tenta `sudo whoami` | "ana não está no arquivo sudoers" |
+| O root acrescenta `bruno` ao `/etc/sudoers`; o bruno faz `sudo whoami` | `root` |
+| O root bloqueia o bruno (`passwd -l`); o bruno, já logado, tenta `sudo` | "senha incorreta" |
+| Quantas vezes a senha foi pedida | 14 pedidos para 14 usos de `sudo` por usuário comum: a senha é pedida em todos |
+
+Os testes das Etapas 1, 2 e 3 foram repetidos e continuam passando.
+
+#### Situação ao final da etapa
+
+- Todo o modelo decidido nas seções 2.4 a 2.7 está implementado: usuários,
+  senhas, grupos com três classes, controle de acesso, `chmod`/`chown`/`chgrp`
+  e `sudo`.
+- Falta atualizar o README (que ainda fala da opção `--user`) e fazer a
+  verificação completa (Etapa 5), e criar a pasta de testes automatizados
+  (Etapa 6).
+
+### Etapa 5 — Fechamento: revisão, README e verificação completa (em andamento)
+
+**Objetivo:** deixar o projeto pronto para entrega: código revisado como um
+todo, README coerente com o sistema atual e uma verificação de ponta a
+ponta com todas as partes funcionando juntas.
+
+#### Planejamento (anotado antes da implementação)
+
+**O que será feito:**
+1. **Revisão do código de ponta a ponta.** Leitura de tudo o que foi
+   alterado nas Etapas 1 a 4, em sequência, procurando casos esquecidos,
+   inconsistências entre módulos, mensagens de erro diferentes para a
+   mesma situação e comentários desatualizados. Até aqui, cada etapa foi
+   revisada sozinha; esta revisão olha o conjunto. Toda correção encontrada
+   será registrada nesta seção.
+2. **README reescrito**, com:
+   - como executar: a primeira execução cria o disco e pede a senha do root;
+     depois disso, entra-se pela tela de login;
+   - o aviso sobre discos no formato antigo;
+   - a tabela completa de comandos (arquivos, diretórios, permissões,
+     usuários, grupos e administração);
+   - um resumo do modelo de segurança, com remissão a este relatório para
+     os detalhes;
+   - o layout do disco e o i-node atualizados (UID/GID e o byte de
+     permissões com 2 bits por classe);
+   - as decisões e limitações atualizadas.
+3. **Roteiro completo de verificação**, num disco novo, encadeando tudo:
+   formatação → criação de usuários e grupos → pasta compartilhada → sudo →
+   todas as tentativas de um usuário comum contra o `/etc/shadow` → bloqueio e
+   desbloqueio de conta → persistência após desmontar e montar o disco.
+
+**O que será alterado:** `README.md`, e eventuais correções pontuais no
+código encontradas na revisão.
+
+**O que será removido do README:**
+- a opção `--user`, que não existe mais;
+- a afirmação de que "nenhuma operação verifica essas permissões" e de que
+  "não há `chmod`";
+- a descrição antiga do i-node (dono e criador como texto, permissões
+  `rwx`).
+
+**Por quê:** o README é a primeira coisa que alguém lê e hoje descreve um
+sistema que não existe mais. A revisão do conjunto e o roteiro completo
+pegam problemas que só aparecem quando as partes interagem, o que os testes
+de cada etapa, feitos separadamente, podem não ter mostrado.
+
+### Etapa 6 (planejada)
+
 - **Etapa 6 — Testes automatizados:** pasta `tests/` com testes que qualquer
   pessoa possa rodar, e instruções no README.
 

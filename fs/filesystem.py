@@ -76,6 +76,7 @@ class FileSystem:
         # pra montar/formatar; depois o login troca pro usuario que entrou
         self.uid = ROOT_UID
         self.gid = ROOT_GID
+        self.cred_changes = 0  # quantas vezes o usuario foi trocado (ver Accounts.sudo)
         self.accounts = Accounts(self)
         # a formatacao ja cria diretorios e a montagem ja le o /etc, e os dois
         # resolvem caminhos -- que precisam de um diretorio atual pra comecar
@@ -246,6 +247,9 @@ class FileSystem:
         """Troca quem ta usando o sistema (login, su)."""
         self.uid = uid
         self.gid = gid
+        # o sudo olha esse contador pra saber se o comando que ele rodou foi
+        # um "su" (ai a troca fica) ou outra coisa (ai volta a ser quem era)
+        self.cred_changes += 1
 
     @contextmanager
     def as_root(self) -> Iterator[None]:

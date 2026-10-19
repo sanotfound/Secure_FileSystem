@@ -3,8 +3,9 @@ Shell interativo (REPL) que expõe os comandos exigidos no trabalho:
 touch, rm, echo (> e >>), cat, cp, mv, ln -s, mkdir, rmdir, ls, cd
 Mais alguns comandos de apoio (pwd, stat, df, help, reset) uteis para
 demonstrar persistencia e uso do disco, os comandos de usuarios (login,
-useradd, passwd, su, logout, whoami, id, users, groups) e os de permissao
-(chmod, chown, chgrp).
+useradd, passwd, su, logout, whoami, id, users, groups), os de permissao
+(chmod, chown, chgrp) e os de grupo e administracao (groupadd, usermod,
+gpasswd, sudo).
 
 O shell so conversa com a pessoa (le comando, pede senha, mostra o
 resultado). Quem decide se pode ou nao e o "kernel" (FileSystem e
@@ -313,6 +314,35 @@ class Shell:
             password = None if fs.uid == ROOT_UID else _ask_password("Senha: ")
             fs.accounts.switch_user(target, password)
 
+        elif cmd == "groupadd":
+            if len(args) != 1:
+                raise FSError("uso: groupadd <grupo>")
+            fs.accounts.groupadd(args[0])
+
+        elif cmd == "usermod":
+            # so a forma "usermod -aG grupo1,grupo2 usuario" (o -G sem o -a
+            # do Linux SUBSTITUI os grupos, e isso a gente nao tem)
+            if len(args) != 3 or args[0] != "-aG":
+                raise FSError("uso: usermod -aG <grupo[,grupo...]> <usuário>")
+            fs.accounts.add_to_groups(args[2], [g for g in args[1].split(",") if g])
+
+        elif cmd == "gpasswd":
+            if len(args) != 3 or args[0] != "-d":
+                raise FSError("uso: gpasswd -d <usuário> <grupo>")
+            fs.accounts.remove_from_group(args[1], args[2])
+            print(f"Removendo {args[1]} do grupo {args[2]}")
+
+        elif cmd == "sudo":
+            if not args:
+                raise FSError("uso: sudo <comando> [argumentos]")
+            # a senha e sempre a de quem ta logado (nao a do root), e e
+            # pedida toda vez -- o root nem precisa digitar
+            password = None
+            if fs.uid != ROOT_UID:
+                password = _ask_password(f"[sudo] senha para {fs.accounts.user_name(fs.uid)}: ")
+            with fs.accounts.sudo(password):
+                return self._dispatch(args[0], args[1:])
+
         elif cmd == "whoami":
             print(fs.accounts.user_name(fs.uid))
 
@@ -501,6 +531,12 @@ class Shell:
     whoami / id [usuário]          mostra o usuário atual / UID, GID e grupos
     users / groups [usuário]       lista os usuários / grupos de um usuário
     logout                         volta para a tela de login
+  Grupos e administração:
+    groupadd <grupo>               cria um grupo (só root)
+    usermod -aG <grupo,...> <usu>  coloca o usuário em um ou mais grupos (só root)
+    gpasswd -d <usuário> <grupo>   tira o usuário do grupo (só root)
+    sudo <comando>                 roda um comando como root, com a SUA senha
+                                   (só quem está no /etc/sudoers, ex.: grupo sudo)
   Outros:
     stat <caminho>                 mostra os campos do i-node e o seu acesso
     df / info                      mostra uso do disco (128 MB)

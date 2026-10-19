@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import copy
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, List, Optional
 
 from fs.constants import (
     FIRST_ID,
@@ -320,6 +321,102 @@ class Accounts:
         backup = self._snapshot()
         self.hashes[name] = hashed
         self._save([SHADOW_PATH], backup)
+
+    def groupadd(self, name: str) -> Group:
+        self.require_root("groupadd")
+        self.check_name(name)
+        if name in self.groups:
+            raise FSError(f"groupadd: grupo '{name}' já existe")
+        gid = self._free_id(g.gid for g in self.groups.values())
+        backup = self._snapshot()
+        group = Group(name, gid)
+        self.groups[name] = group
+        self._save([GROUP_PATH], backup)
+        return group
+
+    def add_to_groups(self, user_name: str, group_names: List[str]) -> None:
+        """usermod -aG: coloca o usuario em um ou mais grupos."""
+        self.require_root("usermod")
+        self.get_user(user_name)
+        # confere se TODOS os grupos existem antes de mexer em qualquer um:
+        # "usermod -aG alunos,naoexiste ana" nao pode deixar a ana so no alunos
+        groups = [self.get_group(g) for g in group_names]
+        backup = self._snapshot()
+        for group in groups:
+            if user_name not in group.members:
+                group.members.append(user_name)
+        self._save([GROUP_PATH], backup)
+
+    def remove_from_group(self, user_name: str, group_name: str) -> None:
+        """gpasswd -d: tira o usuario de um grupo."""
+        self.require_root("gpasswd")
+        user = self.get_user(user_name)
+        group = self.get_group(group_name)
+        if group.gid == user.gid:
+            # o grupo primario fica no passwd, nao na lista de membros -- e
+            # sem ele os arquivos novos da pessoa iam ficar sem grupo dela
+            raise FSError(f"gpasswd: '{group_name}' é o grupo primário de {user_name}, não dá pra tirar")
+        if user_name not in group.members:
+            raise FSError(f"gpasswd: {user_name} não é membro de '{group_name}'")
+        backup = self._snapshot()
+        group.members.remove(user_name)
+        self._save([GROUP_PATH], backup)
+
+    # ---- sudo ----
+
+    def _sudoers_entries(self) -> List[str]:
+        # uma entrada por linha: "ana" (usuario) ou "%sudo" (grupo). So a
+        # primeira palavra conta, entao uma linha no formato do Linux
+        # ("ana ALL=(ALL) ALL") tambem funciona
+        with self.fs.as_root():
+            try:
+                text = self.fs.read_file(SUDOERS_PATH).decode("utf-8", errors="replace")
+            except FSError:
+                return []  # sem sudoers, ninguem usa sudo
+        entries = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                entries.append(line.split()[0])
+        return entries
+
+    def can_sudo(self, user: User) -> bool:
+        group_names = {self.group_name(g) for g in self.group_ids_of(user)}
+        for entry in self._sudoers_entries():
+            if entry == user.name:
+                return True
+            if entry.startswith("%") and entry[1:] in group_names:
+                return True
+        return False
+
+    @contextmanager
+    def sudo(self, password: Optional[str]) -> Iterator[None]:
+        """Roda UM comando como root, se a pessoa provar quem e e estiver no
+        sudoers. Uso: `with accounts.sudo(senha): <roda o comando>`.
+
+        A ordem e a do Linux: primeiro a senha (da propria pessoa, nao a do
+        root), depois o sudoers. O root nao precisa de nada.
+        """
+        if self.fs.uid != ROOT_UID:
+            me = self.user_by_uid(self.fs.uid)
+            # o authenticate e o mesmo do login, entao conta bloqueada tambem
+            # nao passa aqui
+            if me is None or self.authenticate(me.name, password or "") is None:
+                raise FSError("sudo: senha incorreta")
+            if not self.can_sudo(me):
+                raise FSError(f"sudo: {me.name} não está no arquivo sudoers")
+
+        saved = (self.fs.uid, self.fs.gid)
+        changes = self.fs.cred_changes
+        self.fs.uid, self.fs.gid = ROOT_UID, ROOT_GID
+        try:
+            yield
+        finally:
+            # volta a ser quem era, mesmo se o comando deu erro. A excecao e
+            # quando o proprio comando trocou de usuario ("sudo su", "sudo su
+            # bruno"): ai a troca era justamente o que a pessoa queria
+            if self.fs.cred_changes == changes:
+                self.fs.uid, self.fs.gid = saved
 
     def set_locked(self, name: str, locked: bool) -> None:
         """passwd -l / passwd -u: bloqueia ou desbloqueia a conta. O hash
