@@ -447,10 +447,27 @@ não foi implementado por simplicidade: pastas compartilhadas com escrita são
 criadas de propósito pelo root para pessoas de confiança. É um exemplo do
 equilíbrio entre simplicidade e integridade.
 
+Pelo mesmo motivo, um membro também pode **mover** o arquivo de outro para
+fora da pasta: com `w` na pasta compartilhada e na própria home, o bruno
+pode fazer `mv /home/projeto/relatorio.txt ~` e a ana perde o acesso (o
+arquivo continua sendo dela, mas agora está dentro de uma home privada do
+bruno). Com arquivos, o Linux faz o mesmo. Com diretórios, o Linux ainda
+exigiria `w` no próprio diretório movido (porque o `..` dele muda); aqui
+basta `w` nas duas pastas (encontrado na revisão da Etapa 5).
+
 ### 3.5 `~` entre aspas
 
 O shell remove as aspas antes de examinar os argumentos, então `echo "~"`
 também é trocado pela home (no bash, `~` entre aspas não seria trocado).
+
+### 3.6 `sudo` e o redirecionamento do `echo`
+
+No nosso shell, `sudo echo x > /etc/arq` grava o arquivo como root, porque
+o comando inteiro (incluindo o `>`) roda com as credenciais do root. No bash,
+o `>` é feito pelo shell do usuário **antes** de o `sudo` entrar em ação, e a
+mesma linha daria "Permissão negada" (no Linux usa-se `echo x | sudo tee
+/etc/arq`). Isso só vale para quem já está no sudoers, que de qualquer forma
+pode tudo como root (encontrado na revisão da Etapa 5).
 
 ---
 
@@ -462,7 +479,7 @@ também é trocado pela home (no bash, `~` entre aspas não seria trocado).
 | 2 | Controle de acesso (checagem de r/w em todas as operações) | concluída |
 | 3 | `chmod`, `chown` e `chgrp` | concluída |
 | 4 | Grupos (`groupadd`, `usermod -aG`, `gpasswd -d`) e `sudo` | concluída |
-| 5 | README e verificação completa | em andamento |
+| 5 | README e verificação completa | concluída |
 | 6 | Pasta `tests/` com testes automatizados | planejada |
 
 ### Etapa 1 — Usuários, senhas e login (concluída)
@@ -1207,7 +1224,7 @@ Os testes das Etapas 1, 2 e 3 foram repetidos e continuam passando.
   verificação completa (Etapa 5), e criar a pasta de testes automatizados
   (Etapa 6).
 
-### Etapa 5 — Fechamento: revisão, README e verificação completa (em andamento)
+### Etapa 5 — Fechamento: revisão, README e verificação completa (concluída)
 
 **Objetivo:** deixar o projeto pronto para entrega: código revisado como um
 todo, README coerente com o sistema atual e uma verificação de ponta a
@@ -1252,6 +1269,76 @@ código encontradas na revisão.
 sistema que não existe mais. A revisão do conjunto e o roteiro completo
 pegam problemas que só aparecem quando as partes interagem, o que os testes
 de cada etapa, feitos separadamente, podem não ter mostrado.
+
+#### O que foi feito
+
+**1. Revisão do código.** A revisão encontrou dois problemas, corrigidos
+em `fs/shell.py`, e dois comportamentos que foram documentados.
+
+| Achado | O que acontecia | O que foi feito |
+|---|---|---|
+| **Ctrl+C no meio de um comando** | O laço de comandos tratava Ctrl+C só no prompt. Desde a Etapa 1, vários comandos pedem senha no meio (`useradd`, `passwd`, `su`, `sudo`), e um Ctrl+C nesse momento encerrava o programa com erro | **Corrigido:** o Ctrl+C cancela só o comando ("cancelado.") e o shell continua. Se o comando estava rodando com `sudo`, o bloco `finally` do `sudo` já devolve as credenciais do usuário |
+| **Entrada acabando no meio de um comando** | Por exemplo, um arquivo de comandos que termina bem quando uma senha é pedida. Aparecia "erro inesperado:" com a mensagem vazia | **Corrigido:** o shell encerra normalmente, como no fim da entrada no prompt |
+| Mensagem "senha não alterada (tentativas esgotadas)" | Aparecia também no `useradd` e na formatação, onde nenhuma senha estava sendo alterada | **Corrigido:** passou a ser "senha não definida (tentativas esgotadas)" |
+| `sudo` aplicado ao redirecionamento do `echo` | `sudo echo x > arq` grava como root, diferente do bash | **Documentado** na seção 3.6 |
+| Mover arquivos e diretórios de outros em pasta compartilhada | Com `w` nas duas pastas, um membro move o arquivo (ou diretório) de outro para a própria home | **Documentado** na seção 3.4 |
+
+O restante da revisão não encontrou problemas. Itens conferidos:
+- toda operação que lê, cria, altera ou apaga confere permissão antes de
+  mexer no disco;
+- as funções internas do kernel só são chamadas depois da autorização;
+- o modo kernel (`as_root`) e o `sudo` sempre devolvem as credenciais, mesmo
+  com erro;
+- não há texto desatualizado nos comentários (nada de `--user`, nada de
+  "ainda não verifica").
+
+**2. README reescrito**, com:
+- o que o sistema faz;
+- requisitos (Python 3.10 ou mais novo, por causa do `hashlib.scrypt`);
+- como executar (formatação com a senha do root, tela de login, aviso sobre
+  disco antigo) e um exemplo de sessão;
+- tabelas de comandos com "quem pode";
+- resumo do modelo de segurança e a estrutura criada na formatação;
+- mapa dos arquivos do projeto;
+- layout do disco e i-node atualizados (magic `SOF2`, UID/GID, byte de
+  permissões com 2 bits por classe);
+- decisões e limitações atualizadas, com remissões a este relatório.
+
+Também foram retirados: a opção `--user`, a afirmação de que nenhuma
+operação verificava permissões, a de que não havia `chmod` e a descrição
+antiga do i-node.
+
+**3. Verificação completa.** Um roteiro de ponta a ponta, num disco novo,
+que confere sozinho se cada resultado esperado aparece e na ordem certa:
+
+| Parte do roteiro | Conferências |
+|---|---|
+| Formatação; o root cria ana, bruno e carla, o grupo `projeto`, coloca ana e bruno no `projeto` e a ana no `sudo`; cria `/home/projeto` com `chown ana:projeto` e `chmod 660` | homes `drw----` e pasta `drwrw--` |
+| A ana cria um arquivo na home | nasce `-rwr---  ana  ana` |
+| `cat /etc/shadow` sem `sudo`, com `sudo` e de novo sem | negado, mostra os hashes, negado |
+| A ana cria `plano.txt` na pasta e faz `chgrp projeto`; o bruno lê e tenta escrever | lê; escrita negada (o grupo só tem `r`) |
+| O bruno tenta `cat`, `cp`, link + `cat`, `rm`, `mv`, `echo >`, `touch`, `chmod`, `chown`, `chgrp` e `sudo` contra o `/etc/shadow` | 7 "Permissão negada", 3 "Operação não permitida", "não está no arquivo sudoers" |
+| O bruno tenta a home da ana; a carla tenta a pasta do projeto | negados |
+| O root bloqueia a carla; ela tenta entrar; o root desbloqueia | "Login incorreto."; desbloqueio ok |
+| Disco desmontado e montado de novo: a carla entra; a ana lê o próprio arquivo, lista a pasta e roda `id` | tudo persistiu (arquivos, dono, grupo, permissões, grupos da ana) |
+
+Resultado: todas as 34 conferências passaram.
+
+Teste específico das correções (comandos injetados direto no shell):
+
+| Caso | Resultado |
+|---|---|
+| Ctrl+C enquanto o `sudo` pede a senha | "cancelado."; o shell continua; `whoami` = ana |
+| Ctrl+C **já como root**, no meio do `sudo useradd zed` | "cancelado."; `whoami` = ana; `cat /etc/shadow` negado; o `zed` não foi criado |
+| Entrada acaba enquanto o `passwd` pede a senha atual | o programa termina normalmente, sem erro |
+
+As baterias de testes das Etapas 1 a 4 foram repetidas e deram os mesmos
+resultados.
+
+#### Situação ao final da etapa
+
+O sistema está completo e documentado. Falta a Etapa 6: a pasta `tests/`
+com testes automatizados que qualquer pessoa possa rodar.
 
 ### Etapa 6 (planejada)
 

@@ -70,7 +70,7 @@ def _ask_new_password(user: str) -> str:
             print(exc)
             continue
         return first
-    raise FSError("senha não alterada (tentativas esgotadas)")
+    raise FSError("senha não definida (tentativas esgotadas)")
 
 
 class Shell:
@@ -157,6 +157,16 @@ class Shell:
                     return result
             except FSError as exc:
                 print(f"erro: {exc}")
+            except KeyboardInterrupt:
+                # Ctrl+C no meio de um comando (ex.: pedindo senha no sudo ou
+                # no useradd): cancela so esse comando, nao o programa todo.
+                # Se tava no sudo, o finally dele ja devolveu as credenciais
+                print("\ncancelado.")
+            except EOFError:
+                # a entrada acabou no meio de um comando (ex.: arquivo de
+                # comandos terminou bem na hora de pedir uma senha)
+                print()
+                return EXIT
             except Exception as exc:  # protecao extra durante demonstracao
                 print(f"erro inesperado: {exc}")
             finally:
