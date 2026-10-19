@@ -1,7 +1,8 @@
 """
-Excecao usada por todo o sistema de arquivos. Fica num modulo proprio para
-que filesystem.py e accounts.py possam importa-la sem um importar o outro
-em ciclo (filesystem.py usa accounts.py e vice-versa).
+A excecao que o sistema de arquivos inteiro usa. Ficou num arquivo so dela
+porque o filesystem.py importa o accounts.py e o accounts.py tambem precisa
+do erro: se um importasse o outro, o Python travava no import (import
+circular).
 """
 
 

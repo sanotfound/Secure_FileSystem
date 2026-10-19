@@ -191,8 +191,8 @@ preciso `r` em `/`, `/home` e `/home/ana`. Sem essa regra, quem soubesse o
 nome abriria o arquivo e o diretório só esconderia a listagem. Com ela, uma
 home `drw----` fica realmente privada.
 
-**Permissão exigida por comando** (além de `r` nos diretórios do caminho;
-o root ignora as checagens):
+**Permissão exigida por comando** (além de `r` nos diretórios do caminho,
+incluindo o diretório pai do item; o root ignora as checagens):
 
 | Comando | Precisa de |
 |---|---|
@@ -459,7 +459,7 @@ também é trocado pela home (no bash, `~` entre aspas não seria trocado).
 | Etapa | Conteúdo | Situação |
 |---|---|---|
 | 1 | Usuários, senhas e login | concluída |
-| 2 | Controle de acesso (checagem de r/w em todas as operações) | planejada |
+| 2 | Controle de acesso (checagem de r/w em todas as operações) | concluída |
 | 3 | `chmod`, `chown` e `chgrp` | planejada |
 | 4 | Grupos (`groupadd`, `usermod -aG`, `gpasswd -d`) e `sudo` | planejada |
 | 5 | README e verificação completa | planejada |
@@ -640,13 +640,231 @@ entrada vinha de um arquivo) e chamando o kernel diretamente.
   Etapa 2.
 - O README ainda menciona a opção `--user`; será atualizado na Etapa 5.
 
-### Etapas 2 a 6 (planejadas)
+### Etapa 2 — Controle de acesso (concluída)
 
-- **Etapa 2 — Controle de acesso:** função central que decide a classe (root
-  → dono → grupo → outros) e confere `r`/`w`; atravessar diretório exige
-  `r`; checagens em todos os comandos (tabela da seção 2.4); `ls` só com
-  nomes e `ls -l` completo; "seu acesso" no `stat`; permissões da cópia no
-  `cp`; mensagem "Permissão negada".
+**Objetivo:** fazer o sistema passar a conferir as permissões. Ao fim desta
+etapa, um usuário comum não consegue mais ler o `/etc/shadow`, entrar na
+home de outro usuário nem criar arquivos fora dos lugares onde tem `w`.
+
+#### Planejamento (anotado antes da implementação)
+
+**O que será implementado:**
+- **`fs/permissions.py`:** função `effective_access`, que decide em qual
+  classe a pessoa cai para um i-node (root → dono → grupo → outros, parando
+  na primeira; ver seção 2.4) e devolve os bits `r`/`w` que valem para ela.
+  É a única regra de permissão do sistema; tudo o mais a usa.
+- **`fs/filesystem.py`:**
+  - método `_require` que chama `effective_access` com as credenciais atuais
+    e, se faltar a permissão, gera o erro "`<caminho>`: Permissão negada";
+  - os grupos de quem está logado são consultados a cada checagem (grupo
+    primário + grupos em que foi adicionado), para que mudanças de grupo
+    valham na hora (seção 2.6).
+- **Atravessar diretórios exige `r`:** a resolução de caminhos confere `r`
+  em cada diretório antes de procurar um nome dentro dele, **inclusive no
+  diretório pai** do item final. Isso detalha a regra "em todos os casos
+  também é preciso `r` nos diretórios do caminho": o pai faz parte do
+  caminho, então criar ou apagar algo exige `r` (para entrar) e `w` (para
+  alterar) nele.
+- **Checagens em cada operação** (tabela da seção 2.4):
+
+  | Operação | Checagem nova |
+  |---|---|
+  | `cat` | `r` no arquivo |
+  | `echo >`, `echo >>` | `w` no arquivo; se o arquivo não existe, `w` no diretório pai |
+  | `touch` | arquivo existente: `w` nele; arquivo novo: `w` no pai |
+  | `cp` | `r` na origem; no destino, igual ao `echo >` |
+  | `mkdir`, `ln -s` | `w` no pai |
+  | `rm`, `rmdir` | `w` no pai |
+  | `mv` | `w` no pai de origem e no pai de destino |
+  | `ls`, `cd` | `r` no diretório listado ou de destino |
+  | `stat` | nenhuma além de atravessar o caminho |
+
+- **Permissões da cópia no `cp`:** quando o destino é criado, recebe as
+  permissões do original limitadas pelo padrão 640 (seção 2.10).
+- **`fs/shell.py`:**
+  - `ls` passa a mostrar só os nomes; `ls -l` mostra a lista completa
+    (permissões, dono, grupo, tamanho, data);
+  - o `stat` ganha a linha "seu acesso", que mostra os bits que valem para
+    quem está logado e o motivo (é o dono, está no grupo X, cai em "outros"
+    ou é root). Para um link, informa que vale a permissão do alvo.
+
+**O que será alterado:**
+- `resolve` e `split_parent` (conferência de `r` ao atravessar);
+- `touch`, `write_file`, `read_file`, `rm`, `cp`, `mv`, `ln_s`, `mkdir`,
+  `rmdir`, `ls`, `cd` (checagens);
+- `touch` em um link existente passa a atualizar o alvo, como no Linux
+  (antes atualizava o próprio link);
+- o comentário do topo de `filesystem.py`, que hoje diz que o controle de
+  acesso ainda não é aplicado.
+
+**O que será removido:**
+- o `ls` sempre no formato longo (passa a depender de `-l`).
+
+**Por quê:** é o núcleo do que o enunciado pede (leitura e escrita
+controladas por permissões) e o que torna efetiva a proteção do
+`/etc/shadow` (seção 2.2). As checagens ficam no kernel e não no shell
+(seção 2.9). O código interno do sistema (login lendo o shadow, `useradd`
+gravando em `/etc`) continua funcionando porque roda em modo kernel, como
+root.
+
+**Testes planejados:**
+- todas as tentativas de um usuário comum contra o `/etc/shadow` que já
+  são possíveis nesta etapa: `cat`, `cp`, link + `cat`, `rm`, `mv`,
+  `echo >` e criar um arquivo novo em `/etc` (`chmod` e `chown` ficam para a
+  Etapa 3);
+- privacidade das homes: outro usuário não lista, não lê, não cria e não
+  apaga nada dentro de uma home `drw----`;
+- `/etc/passwd` e `/etc/group` continuam legíveis por todos;
+- o root continua podendo tudo;
+- o login, o `passwd` e o `su` continuam funcionando com um usuário comum
+  logado (o kernel lê e grava o shadow em modo root);
+- permissões da cópia no `cp` (original 600 → cópia 600; 644 → 640);
+- `ls`/`ls -l` e a linha "seu acesso" nos casos de dono, grupo, outros,
+  root e link.
+
+#### O que foi implementado
+
+**`fs/permissions.py`**
+- `effective_access(inode, uid, gids)`: devolve a classe (`root`, `dono`,
+  `grupo` ou `outros`) e os bits `r`/`w` que valem. Root ganha `rw` direto;
+  depois a função compara o UID com o dono do i-node; depois procura o grupo
+  do i-node entre os grupos da pessoa; senão, usa os bits de outros. Para na
+  primeira classe que se encaixar (classes exclusivas).
+- `bits_string`: bits de uma classe como texto (`rw`, `r-`, `--`), usada
+  pelo `perm_string` e pela linha "seu acesso".
+
+**`fs/filesystem.py`**
+- `group_ids()`: grupos de quem está logado (primário + grupos em que foi
+  adicionado), consultados nas tabelas de contas a cada checagem.
+- `access_of(inode)`: aplica `effective_access` com as credenciais atuais;
+  usada pelas checagens e pelo `stat`.
+- `_require(inode, bits, rótulo)`: o ponto único de checagem. Se faltar
+  algum dos bits pedidos, a operação para com "`<rótulo>`: Permissão
+  negada", antes de qualquer alteração no disco.
+- `resolve()`: antes de procurar cada nome dentro de um diretório, exige
+  `r` nele. A mensagem de erro informa em qual diretório a resolução parou
+  (ex.: `/home/bruno: Permissão negada` ao tentar `/home/bruno/b.txt`).
+- `split_parent()`: exige `r` também no diretório pai, que é onde a
+  operação vai procurar ou criar o nome.
+- Checagens adicionadas nas operações:
+
+  | Operação | Checagem | Onde |
+  |---|---|---|
+  | `read_file` (`cat`) | `r` no arquivo | depois de resolver o caminho |
+  | `write_file` (`echo`) | `w` no arquivo existente; arquivo novo passa pelo `touch` | antes de gravar |
+  | `touch` | `w` no arquivo existente (se for link, no alvo); `w` no pai para criar | antes de alocar o i-node |
+  | `cp` | `r` na origem; destino pelo `write_file` | antes de ler a origem |
+  | `rm` | `w` no pai | antes de tirar a entrada do diretório |
+  | `mkdir`, `ln_s` | `w` no pai | antes de alocar o i-node |
+  | `rmdir` | `w` no pai | antes de conferir se está vazio |
+  | `mv` | `w` no pai de origem; `r` e `w` no pai de destino | antes de conferir se o destino já existe |
+  | `ls` | `r` no diretório listado | depois de resolver |
+  | `cd` | `r` no diretório de destino | antes de trocar o diretório atual |
+
+- `cp`: quando o destino é criado, recebe `permissão do original & 640`
+  (operação E bit a bit); dono, grupo e criador são de quem copiou. Se o
+  destino já existia, mantém as permissões dele, como no Linux.
+- Comentário do topo atualizado: as checagens ficam nas operações públicas
+  e na resolução de caminhos; as funções de baixo nível (`read_data`,
+  `write_data`, `add_dir_entry`...) não conferem nada, porque são usadas
+  depois que a operação já foi autorizada.
+
+**`fs/shell.py`**
+- `ls` mostra só os nomes; `ls -l` (ou qualquer opção que contenha `l`)
+  mostra a lista completa.
+- `stat` ganhou a linha "seu acesso", com os bits e o motivo: "você é o
+  dono", "você é membro do grupo X", "você não é o dono nem está no grupo:
+  vale 'outros'" ou "você é root: as permissões não se aplicam". Para um
+  link: "vale a permissão do alvo".
+- Texto do `help` atualizado.
+
+#### Detalhes definidos durante a implementação
+
+1. **`mv` confere permissão antes de dizer "já existe".** Se a checagem viesse
+   depois, `mv arq /home/bruno` responderia "já existe" ou não, revelando o
+   conteúdo de um diretório que a pessoa não pode ler.
+2. **`mv` exige `r` e `w` no diretório de destino.** O `w` é para alterar o
+   diretório; o `r` é para procurar o nome dentro dele. Quando o destino é um
+   diretório existente (`mv arq pasta/`), esse diretório não passa pelo
+   `split_parent`, então o `r` precisa ser conferido aqui.
+3. **`cp` sobre um destino que já existe mantém as permissões do destino**
+   (as do original só valem quando a cópia é criada), como no Linux.
+4. **O rótulo do erro é o caminho digitado.** `cat ~/atalho` (link para
+   `/etc/shadow`) responde `/home/ana/atalho: Permissão negada`, como o
+   Linux faz.
+
+Não houve mudanças em relação ao planejamento.
+
+#### Testes realizados
+
+Pelo shell, com um disco novo, os usuários ana e bruno e um arquivo em
+`/root`:
+
+| Tentativa (usuário comum) | Resultado |
+|---|---|
+| `cat /etc/shadow` | Permissão negada |
+| `cp /etc/shadow ~/copia` | Permissão negada |
+| `ln -s /etc/shadow ~/atalho` e depois `cat ~/atalho` | link criado na própria home; leitura negada |
+| `rm /etc/shadow`, `mv /etc/shadow ~/x` | Permissão negada |
+| `echo hack > /etc/shadow`, `echo hack >> /etc/shadow`, `touch /etc/shadow` | Permissão negada |
+| `touch /etc/novo`, `mkdir /x` | Permissão negada |
+| `ls /root`, `cat /root/nota.txt` | Permissão negada |
+| `ls`, `cd`, `cat`, `touch` e `rm` na home de outro usuário | Permissão negada |
+| `mv ~/atalho /home/bruno` | Permissão negada (e não "já existe") |
+| `cat /etc/passwd`, `cat /etc/group`, `ls -l /etc`, `stat /etc/shadow` | permitidos |
+| Na própria home: `echo`, `mkdir`, `cp`, `ls`, `ls -l`, `stat` | permitidos |
+| `passwd` e `su` com usuário comum logado (o kernel grava e lê o shadow) | funcionam |
+| Root: `cat /etc/shadow`, ler a home da ana | permitidos; `stat` mostra "você é root" |
+
+Chamando o kernel diretamente (grupos e permissões montados com
+`set_attrs`, já que `chmod`/`chgrp` são da Etapa 3):
+
+| Caso | Resultado |
+|---|---|
+| Pasta `/home/projeto` `drwrw--` do grupo alunos (ana, bruno): bruno cria arquivo | permitido; o arquivo nasce `-rwr---` com o grupo `bruno` |
+| ana lê o arquivo do bruno antes do "chgrp alunos" | negado (o grupo do arquivo é `bruno`; ana cai em "outros") |
+| ana lê o mesmo arquivo depois do "chgrp alunos" | permitido; escrever continua negado (o grupo só tem `r`) |
+| carla (fora do grupo) lista a pasta ou lê o arquivo | negado |
+| Classes exclusivas: `-r-rw--`, dono bruno, grupo alunos | bruno (dono) não escreve; ana (grupo) escreve |
+| "Todos leem, menos estagiários": `-rw--r-`, grupo estagiarios | carla lê; diego (estagiário) não lê |
+| bruno lê um arquivo da ana pelo grupo; root o tira do grupo | a leitura seguinte já é negada |
+| `cp` de original 600 / 644 | cópia 600 / 640 |
+| `cp` sobre destino existente com 600 | destino continua 600 |
+| carla copia um arquivo legível da ana | cópia com dono, grupo e criador `carla` |
+| Diretório com `-w` para outros (escrita sem leitura) | criar arquivo negado: atravessar exige `r` |
+
+Os testes da Etapa 1 foram repetidos e continuam passando.
+
+#### Situação ao final da etapa
+
+- O `/etc/shadow` está protegido contra todas as tentativas possíveis até
+  aqui. As tentativas por `chmod` e `chown` serão testadas na Etapa 3.
+- Ainda não há comandos para mudar permissões, dono e grupo (Etapa 3) nem
+  para criar grupos e usar `sudo` (Etapa 4).
+
+### Ajuste entre as Etapas 2 e 3: comentários no código
+
+**O que mudou:** os comentários e as docstrings escritos nas Etapas 1 e 2
+foram reescritos em tom informal, explicando o raciocínio do jeito que o
+código original do projeto já fazia (por exemplo: "sem isso, ...", "pra
+nao ficar nada pela metade"). Os comentários do código original não foram
+alterados. Arquivos afetados: `accounts.py`, `constants.py`, `errors.py`,
+`filesystem.py`, `passwords.py`, `permissions.py`, `shell.py` e
+`structs.py`.
+
+**Por quê:** comentários informais tornam o raciocínio mais simples e mais
+fácil de qualquer pessoa entender. Esse passa a ser o padrão das próximas
+etapas.
+
+**Como foi garantido que o código não mudou:** antes da revisão foi
+guardada uma cópia de todos os arquivos. Depois, a árvore sintática (AST)
+de cada arquivo foi comparada com a da cópia, ignorando as docstrings
+(comentários com `#` nem entram na AST). Todos os arquivos tiveram AST
+idêntica. Os testes das Etapas 1 e 2 foram repetidos e deram os mesmos
+resultados.
+
+### Etapas 3 a 6 (planejadas)
+
 - **Etapa 3 — `chmod`, `chown` e `chgrp`:** regras e sintaxes da seção 2.5;
   aplicados a links, agem no alvo.
 - **Etapa 4 — Grupos e `sudo`:** `groupadd`, `usermod -aG`, `gpasswd -d`;

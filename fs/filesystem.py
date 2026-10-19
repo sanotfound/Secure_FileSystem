@@ -2,12 +2,16 @@
 # escrita de conteudo, diretorios, links simbolicos e resolucao de
 # caminhos absolutos/relativos.
 #
-# Esta classe faz o papel do kernel: guarda quem esta usando o sistema
-# agora (self.uid/self.gid, como as credenciais de um processo no Linux) e
-# carimba dono, grupo e permissoes em todo i-node criado. As contas de
-# usuarios e grupos ficam em accounts.py. O controle de acesso das
-# operacoes de arquivo (conferir r/w antes de ler/escrever) ainda nao e
-# aplicado aqui.
+# Essa classe faz o papel do kernel: sabe quem ta usando o sistema agora
+# (self.uid/self.gid, tipo as credenciais de um processo no Linux), carimba
+# dono, grupo e permissoes em todo i-node que nasce e confere r/w antes de
+# cada operacao (_require). As contas de usuarios e grupos ficam no
+# accounts.py, e a regra de permissao em si no permissions.py.
+#
+# As checagens ficam nas operacoes "de fora" (touch, read_file, mkdir...) e
+# na resolucao de caminhos. As funcoes de baixo nivel (read_data,
+# write_data, add_dir_entry...) nao conferem nada de proposito: elas sao o
+# miolo do kernel e so rodam depois que a operacao ja foi liberada.
 
 from __future__ import annotations
 
@@ -39,6 +43,9 @@ from fs.constants import (
     OLD_SUPERBLOCK_MAGIC,
     PERM_600,
     PERM_644,
+    PERM_R,
+    PERM_RW,
+    PERM_W,
     RESERVED_BLOCKS,
     ROOT_GID,
     ROOT_INODE,
@@ -50,27 +57,28 @@ from fs.constants import (
 )
 from fs.disk import Disk
 from fs.errors import FSError
+from fs.permissions import effective_access
 from fs.structs import DirEntry, Inode, SuperBlock
 
-# estrutura criada na formatacao (alem da raiz, que e 644): /etc e /home
-# todos podem ler e atravessar, mas so o root cria coisas dentro; /root e a
-# home do root, fechada como as dos outros usuarios
+# o que a formatacao cria alem da raiz (que e 644): /etc e /home todo mundo
+# le e atravessa, mas so o root cria coisa dentro; /root e a home do root,
+# fechada igual a dos outros usuarios
 INITIAL_DIRS = (("/etc", PERM_644), ("/home", PERM_644), ("/root", PERM_600))
 
 
 class FileSystem:
     def __init__(self, path: str, root_password: Optional[str] = None):
-        """Monta o disco em `path`. Se o arquivo nao existir, cria e formata
-        um disco novo, e para isso precisa da senha do root."""
+        """Monta o disco que ta em `path`. Se o arquivo nao existir, cria e
+        formata um disco novo -- e pra isso precisa da senha do root."""
         self.path = path
 
-        # credenciais de quem esta usando o sistema agora. Comeca como root
-        # so pra montar/formatar; o login troca para o usuario que entrou.
+        # credenciais de quem ta usando o sistema agora. Comeca como root so
+        # pra montar/formatar; depois o login troca pro usuario que entrou
         self.uid = ROOT_UID
         self.gid = ROOT_GID
         self.accounts = Accounts(self)
-        # a formatacao ja cria diretorios e a montagem ja le /etc, e os dois
-        # resolvem caminhos, que precisam de um diretorio atual
+        # a formatacao ja cria diretorios e a montagem ja le o /etc, e os dois
+        # resolvem caminhos -- que precisam de um diretorio atual pra comecar
         self.cwd_inode = ROOT_INODE
 
         # cache em memoria do conteudo de diretorios ja lidos nesta sessao:
@@ -86,7 +94,7 @@ class FileSystem:
         if not Disk.exists(path):
             if root_password is None:
                 raise FSError(f"'{path}' não existe e nenhuma senha de root foi dada para formatar")
-            Accounts.check_password(root_password)  # antes de criar o arquivo de 128 MB
+            Accounts.check_password(root_password)  # confere antes de criar os 128 MB, pra nao sobrar disco pela metade
             Disk.create(path)
             self.disk = Disk(path)
             self._mkfs(root_password)
@@ -143,7 +151,7 @@ class FileSystem:
         self.add_dir_entry(root_num, ".", root_num, _validate=False)
         self.add_dir_entry(root_num, "..", root_num, _validate=False)
 
-        # o resto e criado como root (self.uid/gid ainda sao do root aqui)
+        # o resto nasce como root (aqui o self.uid/gid ainda sao do root)
         for dir_path, perm in INITIAL_DIRS:
             self.set_attrs(self.mkdir(dir_path), perm=perm)
         self.accounts.initialize(root_password)
@@ -235,18 +243,18 @@ class FileSystem:
     # ---- credenciais ----
 
     def set_credentials(self, uid: int, gid: int) -> None:
-        """Troca quem esta usando o sistema (login, su)."""
+        """Troca quem ta usando o sistema (login, su)."""
         self.uid = uid
         self.gid = gid
 
     @contextmanager
     def as_root(self) -> Iterator[None]:
-        """Modo kernel: roda um trecho com as credenciais do root e depois
-        devolve as originais, mesmo se der erro no meio (finally).
+        """Modo kernel: roda um trecho como root e depois volta pras
+        credenciais de antes -- mesmo se der erro no meio (por isso o finally).
 
-        Usado so por codigo do proprio sistema que precisa mexer em arquivos
-        protegidos -- ex.: o login lendo o /etc/shadow, o useradd gravando
-        nos arquivos de /etc. Nenhum comando digitado no shell entra aqui.
+        So o codigo do proprio sistema usa isso, quando precisa mexer em
+        arquivo protegido: ex.: o login lendo o /etc/shadow, o useradd
+        gravando no /etc. Nenhum comando digitado no shell chega aqui.
         """
         saved = (self.uid, self.gid)
         self.uid, self.gid = ROOT_UID, ROOT_GID
@@ -255,10 +263,32 @@ class FileSystem:
         finally:
             self.uid, self.gid = saved
 
+    def group_ids(self) -> List[int]:
+        """Grupos de quem ta logado: o primario + os grupos em que a pessoa
+        foi colocada depois. A gente consulta isso a cada checagem (em vez de
+        guardar no login) pra uma mudanca de grupo valer na hora."""
+        user = self.accounts.user_by_uid(self.uid)
+        return self.accounts.group_ids_of(user) if user else [self.gid]
+
+    def access_of(self, inode: Inode) -> Tuple[str, int]:
+        """Em qual classe (root/dono/grupo/outros) quem ta logado cai nesse
+        i-node, e quais bits r/w valem pra ele."""
+        return effective_access(inode, self.uid, self.group_ids())
+
+    def _require(self, inode: Inode, want: int, label: str) -> None:
+        """Toda checagem de permissao passa por aqui. Se faltar o r ou o w que
+        foi pedido em `want`, para tudo com "<label>: Permissao negada" -- e
+        isso acontece antes de mexer em qualquer coisa no disco, pra nao
+        ficar nada pela metade."""
+        _, bits = self.access_of(inode)
+        if bits & want != want:
+            raise FSError(f"{label}: Permissão negada")
+
     def set_attrs(self, num: int, owner_uid: Optional[int] = None,
                   gid: Optional[int] = None, perm: Optional[int] = None) -> None:
-        """Altera dono, grupo e/ou permissoes de um i-node, sem checagem
-        nenhuma (uso interno do kernel)."""
+        """Muda dono, grupo e/ou permissoes de um i-node sem checar nada --
+        so o kernel usa (ex.: entregar a home pro usuario no useradd). O
+        chmod/chown de verdade conferem as regras antes de chamar isso."""
         inode = self.read_inode(num)
         if owner_uid is not None:
             inode.owner_uid = owner_uid
@@ -676,6 +706,11 @@ class FileSystem:
             inode = self.read_inode(cur)
             if inode.type != TYPE_DIR:
                 raise FSError(f"{part}: '{inode.name}' não é um diretório")
+            # procurar um nome dentro de um diretorio e "atravessar" ele, e
+            # pra isso precisa de r (aqui o r faz o papel do x do Linux).
+            # Ex.: pra chegar em /home/ana/x.txt precisa de r em /, em /home
+            # e em /home/ana
+            self._require(inode, PERM_R, self._path_prefix(path, parts, i))
             target = self._dir_lookup(cur, part)
             if target is None:
                 raise FSError(f"{part}: arquivo ou diretório não encontrado")
@@ -685,6 +720,23 @@ class FileSystem:
                 target = self.resolve(link_path, cwd_inode=cur, follow_symlink=True, _depth=_depth + 1)
             cur = target
         return cur
+
+    @staticmethod
+    def _path_prefix(path: str, parts: List[str], i: int) -> str:
+        """Em qual diretorio a resolucao ta no passo i, so pra mensagem de
+        erro: resolvendo "/home/ana/x.txt" pode dar "/home/ana"; resolvendo
+        "x.txt", da "."."""
+        prefix = "/".join(parts[:i])
+        if path.startswith("/"):
+            return "/" + prefix
+        return prefix or "."
+
+    def _exists(self, path: str) -> bool:
+        try:
+            self.resolve(path)
+            return True
+        except FSError:
+            return False
 
     def split_parent(self, path: str) -> Tuple[int, str]:
         path = path.rstrip("/")
@@ -700,10 +752,14 @@ class FileSystem:
         if name in ("", ".", ".."):
             raise FSError(f"'{path}': nome inválido")
         parent_inode = self.resolve(parent_path)
-        if self.read_inode(parent_inode).type != TYPE_DIR:
+        parent = self.read_inode(parent_inode)
+        if parent.type != TYPE_DIR:
             # sem isso, "touch arq/x" gravava entradas de diretorio dentro
             # dos blocos de dados de um arquivo comum e o corrompia
             raise FSError(f"{parent_path}: não é um diretório")
+        # quem chamou vai procurar `name` dentro do pai, e isso tambem e
+        # atravessar o pai -- ele faz parte do caminho, entao precisa de r
+        self._require(parent, PERM_R, parent_path)
         return parent_inode, name
 
     def path_of(self, inode_num: int) -> str:
@@ -746,9 +802,9 @@ class FileSystem:
         return maybe_ancestor == self.sb.root_inode
 
     def _new_inode(self, itype: int, perm: int, name: str, now: float) -> Inode:
-        # quem cria vira dono e criador; o grupo e o grupo primario de quem
-        # cria (regra do Linux) -- com o grupo proprio de cada usuario, o
-        # arquivo nasce acessivel so a ele mesmo pelo grupo
+        # quem cria vira dono e criador, e o grupo e o grupo primario de quem
+        # criou (regra do Linux). Como cada usuario tem um grupo so dele, o
+        # "grupo" de um arquivo novo e so o proprio dono: nasce privado
         return Inode(
             used=1, type=itype, perm=perm, name=name,
             owner_uid=self.uid, gid=self.gid, creator_uid=self.uid,
@@ -761,12 +817,16 @@ class FileSystem:
         parent, name = self.split_parent(path)
         num = self._dir_lookup(parent, name)
         if num is not None:
+            num = self.resolve(path)  # se for link, atualiza o alvo (igual no Linux)
             inode = self.read_inode(num)
+            self._require(inode, PERM_W, path)  # mudar a data ja e mexer no arquivo
             inode.modified_at = time.time()
             self.write_inode(num, inode)
             return num
 
         self._check_name(name)  # valida antes de gastar i-node
+        # criar arquivo e botar uma entrada nova no diretorio pai: w no pai
+        self._require(self.read_inode(parent), PERM_W, path)
         num = self.alloc_inode()
         now = time.time()
         inode = self._new_inode(TYPE_FILE, DEFAULT_FILE_PERM, name, now)
@@ -788,8 +848,9 @@ class FileSystem:
                 inode = self.read_inode(num)
             if inode.type == TYPE_DIR:
                 raise FSError(f"{name}: é um diretório")
+            self._require(inode, PERM_W, path)
         else:
-            num = self.touch(path)
+            num = self.touch(path)  # o touch ja confere o w no diretorio pai
 
         if append:
             self.append_data(num, content)
@@ -802,6 +863,7 @@ class FileSystem:
         inode = self.read_inode(num)
         if inode.type == TYPE_DIR:
             raise FSError(f"{path}: é um diretório")
+        self._require(inode, PERM_R, path)
         return self.read_data(num)
 
     def rm(self, path: str) -> None:
@@ -812,6 +874,9 @@ class FileSystem:
         inode = self.read_inode(num)
         if inode.type == TYPE_DIR:
             raise FSError(f"{name}: é um diretório (use rmdir)")
+        # apagar e tirar a entrada do diretorio pai, entao o que conta e o w
+        # no pai, nao no arquivo (igual no Linux)
+        self._require(self.read_inode(parent), PERM_W, path)
         self.remove_dir_entry(parent, name)
         self.free_all_data(num)
         self.free_inode(num)
@@ -821,6 +886,7 @@ class FileSystem:
         src_inode = self.read_inode(src_num)
         if src_inode.type != TYPE_FILE:
             raise FSError(f"{src}: cp só é suportado para arquivos")
+        self._require(src_inode, PERM_R, src)
         data = self.read_data(src_num)
 
         dst_final = dst
@@ -832,7 +898,17 @@ class FileSystem:
         except FSError:
             pass
 
-        self.write_file(dst_final, data, append=False)
+        created = not self._exists(dst_final)
+        # o write_file confere o w no destino (ou no diretorio pai, se for criar)
+        num = self.write_file(dst_final, data, append=False)
+        if created:
+            # copia nova: pega as permissoes do original, mas limitadas pelo
+            # padrao (E bit a bit), entao nunca fica mais aberta que o
+            # original: 600 continua 600, 644 vira 640. Dono e grupo sao de
+            # quem copiou, porque foi ele que o write_file usou pra criar
+            # (se mantivesse o dono do original, dava pra criar arquivo no
+            # nome dos outros)
+            self.set_attrs(num, perm=src_inode.perm & DEFAULT_FILE_PERM)
 
     def mv(self, src: str, dst: str) -> None:
         src_parent, src_name = self.split_parent(src)
@@ -850,6 +926,14 @@ class FileSystem:
             pass
         if dst_parent is None:
             dst_parent, dst_name = self.split_parent(dst)
+
+        # mover tira o nome de um diretorio e bota em outro, entao mexe nos
+        # dois. No destino precisa de r tambem, pra procurar o nome la
+        # dentro. E isso tem que vir antes do "ja existe": senao a resposta
+        # (existe / nao existe) entregaria o que tem dentro de um diretorio
+        # que a pessoa nem pode ler
+        self._require(self.read_inode(src_parent), PERM_W, src)
+        self._require(self.read_inode(dst_parent), PERM_RW, dst)
 
         if self._dir_lookup(dst_parent, dst_name) is not None:
             raise FSError(f"{dst_name}: já existe")
@@ -876,6 +960,10 @@ class FileSystem:
         if self._dir_lookup(parent, name) is not None:
             raise FSError(f"{name}: já existe")
         self._check_name(name)
+        # aqui so o pai e conferido: criar link pra qualquer coisa nao da
+        # acesso a ela, porque quem segue o link cai na checagem do alvo
+        # (ex.: link pro /etc/shadow pode, mas o cat nele da Permissao negada)
+        self._require(self.read_inode(parent), PERM_W, link_path)
         num = self.alloc_inode()
         now = time.time()
         inode = self._new_inode(TYPE_SYMLINK, DEFAULT_SYMLINK_PERM, name, now)
@@ -896,6 +984,7 @@ class FileSystem:
             raise FSError(f"{name}: já existe")
 
         self._check_name(name)
+        self._require(self.read_inode(parent), PERM_W, path)
         num = self.alloc_inode()
         now = time.time()
         inode = self._new_inode(TYPE_DIR, DEFAULT_DIR_PERM, name, now)
@@ -919,6 +1008,7 @@ class FileSystem:
         inode = self.read_inode(num)
         if inode.type != TYPE_DIR:
             raise FSError(f"{name}: não é um diretório")
+        self._require(self.read_inode(parent), PERM_W, path)
         contents = [e for e in self.read_dir_entries(num) if e[0] not in (".", "..")]
         if contents:
             raise FSError(f"{name}: diretório não está vazio")
@@ -934,6 +1024,7 @@ class FileSystem:
         inode = self.read_inode(num)
         if inode.type != TYPE_DIR:
             raise FSError(f"{path}: não é um diretório")
+        self._require(inode, PERM_R, path or ".")
         result = []
         for name, child_num in sorted(self.read_dir_entries(num)):
             if name in (".", ".."):
@@ -947,6 +1038,7 @@ class FileSystem:
         inode = self.read_inode(num)
         if inode.type != TYPE_DIR:
             raise FSError(f"{path}: não é um diretório")
+        self._require(inode, PERM_R, path)  # entrar no diretorio = atravessar, precisa de r
         self.cwd_inode = num
 
     def usage(self) -> dict:

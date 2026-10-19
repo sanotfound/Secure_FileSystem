@@ -5,9 +5,9 @@ Mais alguns comandos de apoio (pwd, stat, df, help, reset) uteis para
 demonstrar persistencia e uso do disco, e os comandos de usuarios (login,
 useradd, passwd, su, logout, whoami, id, users, groups).
 
-O shell so conversa com o usuario (le comandos, pede senhas, imprime
-resultados). Quem decide se algo e permitido e o "kernel" (FileSystem e
-Accounts).
+O shell so conversa com a pessoa (le comando, pede senha, mostra o
+resultado). Quem decide se pode ou nao e o "kernel" (FileSystem e
+Accounts) -- o shell nunca libera nada sozinho.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ import sys
 from fs.accounts import Accounts
 from fs.constants import ROOT_UID, TYPE_DIR, TYPE_FILE, TYPE_SYMLINK
 from fs.filesystem import FileSystem, FSError
-from fs.permissions import perm_string
+from fs.permissions import GROUP, OTHER, OWNER, ROOT, bits_string, perm_string
 
 DEFAULT_DISK_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "disco.img")
 MAX_LOGIN_ATTEMPTS = 3
 
-# o que _dispatch devolve para encerrar a sessao
+# o que o _dispatch devolve quando a sessao tem que acabar
 EXIT, LOGOUT = "exit", "logout"
 
 
@@ -44,16 +44,18 @@ def _fmt_size(n: int) -> str:
 
 
 def _ask_password(prompt: str) -> str:
-    # getpass nao mostra o que e digitado. Quando a entrada nao e um
-    # terminal (comandos vindos de um arquivo, nos testes automatizados),
-    # nao ha o que esconder e a senha e lida como uma linha comum.
+    # o getpass nao mostra o que a pessoa digita. Mas quando a entrada nao e
+    # um terminal (comandos vindo de um arquivo, tipo nos testes
+    # automatizados), nao tem tela pra esconder nada, entao a senha e lida
+    # como uma linha normal
     if sys.stdin.isatty():
         return getpass.getpass(prompt)
     return input(prompt)
 
 
 def _ask_new_password(user: str) -> str:
-    """Pede a senha nova duas vezes (pega erro de digitacao) e recusa vazia."""
+    """Pede a senha nova duas vezes (pra pegar erro de digitacao) e nao
+    aceita senha vazia."""
     for _ in range(MAX_LOGIN_ATTEMPTS):
         first = _ask_password(f"Nova senha para {user}: ")
         second = _ask_password("Repita a nova senha: ")
@@ -61,7 +63,7 @@ def _ask_new_password(user: str) -> str:
             print("As senhas não conferem.")
             continue
         try:
-            Accounts.check_password(first)  # mesma regra que o kernel aplica
+            Accounts.check_password(first)  # a mesma regra do kernel, sem repetir codigo
         except FSError as exc:
             print(exc)
             continue
@@ -96,7 +98,7 @@ class Shell:
 
     def _login(self) -> bool:
         """Tela de login. Devolve False se a entrada acabou ou se as
-        tentativas se esgotaram (o programa encerra)."""
+        tentativas acabaram (ai o programa fecha)."""
         for _ in range(MAX_LOGIN_ATTEMPTS):
             try:
                 name = input("login: ").strip()
@@ -107,8 +109,9 @@ class Shell:
             except KeyboardInterrupt:
                 print()
                 continue
-            # mesma mensagem para usuario inexistente, senha errada ou conta
-            # bloqueada: quem tenta entrar nao descobre qual foi o caso
+            # a mesma mensagem pra usuario que nao existe, senha errada ou
+            # conta bloqueada: quem ta tentando entrar nao fica sabendo qual
+            # dos tres foi
             user = self.fs.accounts.login(name, password)
             if user is None:
                 print("Login incorreto.")
@@ -119,7 +122,7 @@ class Shell:
         return False
 
     def _session(self) -> str:
-        """Laço de comandos de um usuario logado. Devolve EXIT ou LOGOUT."""
+        """Laco de comandos de quem ta logado. Devolve EXIT ou LOGOUT."""
         while True:
             try:
                 line = input(self._prompt())
@@ -144,8 +147,8 @@ class Shell:
                 continue
 
             try:
-                # o root pode ter editado /etc/passwd, /etc/group... a mao no
-                # comando anterior; vale sempre o que esta no disco
+                # o root pode ter editado o /etc/passwd, /etc/group... na mao
+                # no comando anterior, e o que vale e sempre o que ta no disco
                 self.fs.accounts.load()
                 result = self._dispatch(tokens[0], self._expand_tilde(tokens[1:]))
                 if result in (EXIT, LOGOUT):
@@ -181,7 +184,7 @@ class Shell:
         return f"{user}@sofs:{path}{sign} "
 
     def _expand_tilde(self, args):
-        # como no bash: "~" e "~/..." viram a home de quem esta logado
+        # igual no bash: "~" e "~/..." viram a home de quem ta logado
         home = self._home().rstrip("/")
         out = []
         for a in args:
@@ -249,8 +252,9 @@ class Shell:
                 fs.rmdir(p)
 
         elif cmd == "ls":
-            paths = [a for a in args if not a.startswith("-")]  # ignora flags como -l
-            self._ls(paths[0] if paths else None)
+            flags = "".join(a[1:] for a in args if a.startswith("-"))
+            paths = [a for a in args if not a.startswith("-")]
+            self._ls(paths[0] if paths else None, long="l" in flags)
 
         elif cmd == "cd":
             fs.cd(args[0] if args else self._home())
@@ -272,7 +276,7 @@ class Shell:
         elif cmd == "useradd":
             if len(args) != 1:
                 raise FSError("uso: useradd <usuário>")
-            fs.accounts.check_useradd(args[0])  # antes de pedir a senha
+            fs.accounts.check_useradd(args[0])  # confere tudo antes, pra nao pedir senha a toa
             fs.accounts.useradd(args[0], _ask_new_password(args[0]))
 
         elif cmd == "passwd":
@@ -282,7 +286,7 @@ class Shell:
             if len(args) > 1:
                 raise FSError("uso: su [usuário]")
             target = args[0] if args else "root"
-            # o root nao precisa de senha para virar outro usuario
+            # o root nao precisa de senha pra virar outro usuario
             password = None if fs.uid == ROOT_UID else _ask_password("Senha: ")
             fs.accounts.switch_user(target, password)
 
@@ -341,8 +345,8 @@ class Shell:
         target = args[0] if args else me
         current = None
         if self.fs.uid != ROOT_UID:
-            # a regra vale no kernel (change_password); aqui so evita pedir
-            # senhas a toa quando a resposta ja vai ser "nao"
+            # quem decide de verdade e o kernel (change_password); isso aqui
+            # so evita pedir senha a toa quando a resposta ja vai ser "nao"
             if target != me:
                 raise FSError("passwd: Permissão negada")
             current = _ask_password("Senha atual: ")
@@ -359,10 +363,13 @@ class Shell:
         groups = ",".join(f"{g}({acc.group_name(g)})" for g in acc.group_ids_of(user))
         print(f"uid={user.uid}({user.name}) gid={user.gid}({acc.group_name(user.gid)}) grupos={groups}")
 
-    def _ls(self, path) -> None:
+    def _ls(self, path, long: bool) -> None:
         acc = self.fs.accounts
         entries = self.fs.ls(path)
         if not entries:
+            return
+        if not long:
+            print("  ".join(name for name, _, _ in entries))
             return
         for name, inode, num in entries:
             perm = perm_string(inode.perm, inode.type)
@@ -389,10 +396,26 @@ class Shell:
         print(f"  grupo:         {acc.group_name(inode.gid)} ({inode.gid})")
         print(f"  criador:       {acc.user_name(inode.creator_uid)} ({inode.creator_uid})")
         print(f"  permissões:    {perm_string(inode.perm, inode.type)}")
+        print(f"  seu acesso:    {self._my_access(inode)}")
         print(f"  tamanho:       {inode.size} bytes")
         print(f"  criado em:     {_fmt_time(inode.created_at)}")
         print(f"  modificado em: {_fmt_time(inode.modified_at)}")
         print(f"  blocos usados: {len(blocks)} ({blocks})")
+
+    def _my_access(self, inode) -> str:
+        """O que quem ta logado pode fazer com esse i-node, e por qual classe
+        -- usando a mesma regra que o kernel usa pra decidir, entao o que
+        aparece aqui e o que vale de verdade."""
+        if inode.type == TYPE_SYMLINK:
+            return "vale a permissão do alvo (link não tem permissão própria)"
+        cls, bits = self.fs.access_of(inode)
+        reason = {
+            ROOT: "você é root: as permissões não se aplicam",
+            OWNER: "você é o dono",
+            GROUP: f"você é membro do grupo {self.fs.accounts.group_name(inode.gid)}",
+            OTHER: "você não é o dono nem está no grupo: vale 'outros'",
+        }[cls]
+        return f"{bits_string(bits)}  ({reason})"
 
     def _df(self) -> None:
         u = self.fs.usage()
@@ -409,7 +432,8 @@ class Shell:
               f"({u['free_inodes']} livres)")
 
     def _reset(self):
-        # apagar o disco de todos e tarefa de administrador (disponibilidade)
+        # apagar o disco de todo mundo e coisa de administrador (e o "A" da CIA:
+        # disponibilidade)
         self.fs.accounts.require_root("reset")
         answer = input("Isso apaga TODO o conteúdo do disco atual. Digite 'sim' para confirmar: ")
         if answer.strip().lower() != "sim":
@@ -421,7 +445,7 @@ class Shell:
         os.remove(self.disk_path)
         self.fs = FileSystem(self.disk_path, root_password=password)
         print("disco reformatado. Entre de novo.")
-        return LOGOUT  # as contas antigas nao existem mais
+        return LOGOUT  # as contas antigas sumiram junto, entao volta pro login
 
     def _help(self) -> None:
         print("""Comandos disponíveis:
@@ -437,7 +461,7 @@ class Shell:
   Diretórios:
     mkdir <dir>                    cria diretório
     rmdir <dir>                    remove diretório vazio
-    ls [dir]                       lista conteúdo do diretório
+    ls [-l] [dir]                  lista o diretório (-l: permissões, dono, grupo...)
     cd [dir]                       muda o diretório atual (sem argumento: home)
     pwd                            mostra o diretório atual
   Usuários:
@@ -449,7 +473,7 @@ class Shell:
     users / groups [usuário]       lista os usuários / grupos de um usuário
     logout                         volta para a tela de login
   Outros:
-    stat <caminho>                 mostra os campos do i-node
+    stat <caminho>                 mostra os campos do i-node e o seu acesso
     df / info                      mostra uso do disco (128 MB)
     reset                          reformata o disco (só root, pede confirmação)
     help                           esta mensagem

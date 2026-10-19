@@ -1,19 +1,19 @@
 """
-Contas de usuarios e grupos, guardadas como no Linux: arquivos de texto
+Contas de usuarios e grupos, guardadas igual no Linux: arquivos de texto
 dentro do proprio sistema de arquivos.
 
-  /etc/passwd   nome:x:uid:gid:home              todos leem   (rwr-r-)
-  /etc/shadow   nome:hash                        so o root    (rw----)
-  /etc/group    nome:x:gid:membro1,membro2       todos leem   (rwr-r-)
-  /etc/sudoers  um usuario ou %grupo por linha   so o root    (rw----)
+  /etc/passwd   nome:x:uid:gid:home              todo mundo le  (rwr-r-)
+  /etc/shadow   nome:hash                        so o root      (rw----)
+  /etc/group    nome:x:gid:membro1,membro2       todo mundo le  (rwr-r-)
+  /etc/sudoers  um usuario ou %grupo por linha   so o root      (rw----)
 
-O "x" no passwd e no group indica que a senha nao fica ali (fica no shadow),
-como no Linux. No group, a lista de membros so tem quem foi adicionado ao
-grupo depois; o grupo primario de cada usuario e o gid que esta no passwd.
+O "x" no passwd e no group so avisa que a senha nao ta ali (ta no shadow),
+igual no Linux. No group, a lista de membros so tem quem foi colocado no
+grupo depois; o grupo primario de cada um e o gid que ta no passwd.
 
-Esta classe faz parte do "kernel": le e grava esses arquivos sempre em modo
-root (FileSystem.as_root), entao funciona mesmo com o shadow fechado para
-quem esta logado. As regras de quem pode fazer o que (ex.: so o root cria
+Essa classe faz parte do "kernel": ela le e grava esses arquivos sempre em
+modo root (FileSystem.as_root), entao funciona mesmo com o shadow fechado
+pra quem ta logado. As regras de quem pode fazer o que (ex.: so o root cria
 usuario) tambem ficam aqui, e nao no shell.
 """
 
@@ -43,11 +43,12 @@ from fs.passwords import hash_password, lock, unlock, verify_password, waste_tim
 if TYPE_CHECKING:
     from fs.filesystem import FileSystem
 
-# nome de usuario/grupo: minusculas, digitos e _, sem comecar com digito
-# (o limite de tamanho e conferido a parte, com MAX_USER_LEN)
+# nome de usuario/grupo: minusculas, digitos e _, sem comecar com digito (o
+# tamanho maximo e conferido separado, com o MAX_USER_LEN). Com isso um nome
+# nunca tem ":" nem quebra de linha e nao bagunca o formato dos arquivos
 NAME_RE = re.compile(r"[a-z_][a-z0-9_]*")
 
-# permissao com que o kernel sempre regrava cada arquivo de contas
+# permissao com que o kernel regrava cada arquivo de contas, toda vez
 FILE_PERMS = {PASSWD_PATH: PERM_644, SHADOW_PATH: PERM_600, GROUP_PATH: PERM_644}
 
 DEFAULT_SUDOERS = (
@@ -75,17 +76,18 @@ class Accounts:
     def __init__(self, fs: "FileSystem"):
         self.fs = fs
         self.users: Dict[str, User] = {}
-        self.hashes: Dict[str, str] = {}  # nome -> texto guardado no shadow
+        self.hashes: Dict[str, str] = {}  # nome -> texto que ta no shadow
         self.groups: Dict[str, Group] = {}
 
     # ---- leitura e gravacao dos arquivos de contas ----
 
     def load(self) -> None:
-        """Le passwd, shadow e group do disco para as tabelas em memoria.
+        """Le passwd, shadow e group do disco pras tabelas em memoria.
 
-        O shell chama isso antes de cada comando: o root pode ter editado um
-        desses arquivos a mao (ex.: echo >> /etc/group), e o que vale e
-        sempre o que esta no disco. Linha malformada e ignorada.
+        O shell chama isso antes de cada comando, porque o root pode ter
+        editado um desses arquivos na mao (ex.: echo >> /etc/group) e o que
+        vale e sempre o que ta no disco. Linha mal formada e so ignorada, pra
+        nao derrubar o sistema por causa de uma linha torta.
         """
         with self.fs.as_root():
             passwd = self._read_lines(PASSWD_PATH)
@@ -109,7 +111,7 @@ class Accounts:
         try:
             text = self.fs.read_file(path).decode("utf-8", errors="replace")
         except FSError:
-            return []  # arquivo removido: fica sem essas contas, como no Linux
+            return []  # arquivo apagado: fica sem essas contas, igual no Linux
         return [line.split(":") for line in text.splitlines()
                 if line.strip() and not line.startswith("#")]
 
@@ -127,19 +129,20 @@ class Accounts:
     def _write_one(self, path: str) -> None:
         with self.fs.as_root():
             num = self.fs.write_file(path, self._render(path), append=False)
-            # sempre root:root e com a permissao padrao do arquivo, mesmo que
-            # alguem o tenha apagado e o write_file tenha criado de novo
+            # sempre root:root e com a permissao padrao do arquivo, mesmo se
+            # alguem tiver apagado ele e o write_file tiver criado de novo --
+            # assim o shadow nunca fica aberto
             self.fs.set_attrs(num, owner_uid=ROOT_UID, gid=ROOT_GID, perm=FILE_PERMS[path])
 
     def _snapshot(self):
         return copy.deepcopy((self.users, self.hashes, self.groups))
 
     def _save(self, paths: List[str], backup) -> None:
-        """Grava os arquivos alterados, na ordem dada. Tudo ou nada.
+        """Grava os arquivos na ordem que vieram, tudo ou nada.
 
-        write_data ja e tudo-ou-nada por arquivo (se o disco encher, o
-        arquivo fica como estava). Entao, se um arquivo falhar, so os que ja
-        foram gravados antes dele precisam voltar ao conteudo antigo.
+        Se o disco encher no meio, desfaz: o arquivo que deu erro ja ficou
+        como tava (o write_data e tudo ou nada), entao so precisa voltar os
+        que ja tinham sido gravados antes dele.
         """
         written: List[str] = []
         try:
@@ -168,7 +171,7 @@ class Accounts:
 
     def user_name(self, uid: int) -> str:
         user = self.user_by_uid(uid)
-        return user.name if user else str(uid)  # dono sem conta: mostra o numero
+        return user.name if user else str(uid)  # dono sem conta: mostra o numero mesmo
 
     def group_name(self, gid: int) -> str:
         for group in self.groups.values():
@@ -180,7 +183,7 @@ class Accounts:
         return [u.name for u in sorted(self.users.values(), key=lambda u: u.uid)]
 
     def group_ids_of(self, user: User) -> List[int]:
-        """Grupo primario + grupos em que o usuario foi adicionado."""
+        """Grupo primario + os grupos em que a pessoa foi colocada depois."""
         gids = [user.gid]
         for group in sorted(self.groups.values(), key=lambda g: g.gid):
             if user.name in group.members and group.gid not in gids:
@@ -195,8 +198,9 @@ class Accounts:
 
     @staticmethod
     def check_password(password: str) -> None:
-        # sem regras de tamanho ou de simbolos (ambiente controlado); so nao
-        # aceita vazia, pra um Enter sem querer nao deixar a conta sem senha
+        # sem regra de tamanho nem de simbolo (ambiente controlado, aqui nao
+        # faz diferenca); so nao aceita senha vazia, pra um Enter sem querer
+        # nao deixar a conta sem senha
         if not password:
             raise FSError("a senha não pode ser vazia")
 
@@ -217,8 +221,8 @@ class Accounts:
     # ---- operacoes ----
 
     def initialize(self, root_password: str) -> None:
-        """Contas iniciais, criadas na formatacao: usuario root e grupos
-        root e sudo, mais o /etc/sudoers padrao."""
+        """Contas que ja nascem na formatacao: o usuario root, os grupos root
+        e sudo e o /etc/sudoers padrao."""
         self.users = {"root": User("root", ROOT_UID, ROOT_GID, "/root")}
         self.hashes = {"root": hash_password(root_password)}
         self.groups = {"root": Group("root", ROOT_GID), "sudo": Group("sudo", SUDO_GID)}
@@ -229,9 +233,9 @@ class Accounts:
             self.fs.set_attrs(num, owner_uid=ROOT_UID, gid=ROOT_GID, perm=PERM_600)
 
     def authenticate(self, name: str, password: str) -> Optional[User]:
-        """Confere usuario e senha. Devolve None se o usuario nao existir, se
-        a senha estiver errada ou se a conta estiver bloqueada -- sem dizer
-        qual dos tres, e gastando o mesmo tempo nos tres casos."""
+        """Confere usuario e senha. Devolve None se o usuario nao existe, se a
+        senha ta errada ou se a conta ta bloqueada -- sem dizer qual dos tres,
+        e demorando o mesmo tempo nos tres casos."""
         self.load()
         user, stored = self.users.get(name), self.hashes.get(name)
         if user is None or stored is None:
@@ -246,7 +250,7 @@ class Accounts:
         return user
 
     def switch_user(self, name: str, password: Optional[str]) -> User:
-        """su: troca o usuario atual. O root troca sem senha, como no Linux."""
+        """su: troca o usuario atual. O root troca sem senha, igual no Linux."""
         if self.fs.uid == ROOT_UID:
             user = self.get_user(name)
         else:
@@ -257,8 +261,8 @@ class Accounts:
         return user
 
     def check_useradd(self, name: str) -> None:
-        """Tudo o que o useradd confere antes de criar a conta. O shell chama
-        isto antes de pedir a senha, pra nao pedir senha a toa."""
+        """Tudo que o useradd confere antes de criar a conta. O shell chama
+        isso antes de pedir a senha, pra pessoa nao digitar senha a toa."""
         self.require_root("useradd")
         self.check_name(name)
         if name in self.users or name in self.groups:
@@ -269,13 +273,13 @@ class Accounts:
         self.check_password(password)
         uid = self._free_id(u.uid for u in self.users.values())
         group_ids = {g.gid for g in self.groups.values()}
-        # grupo proprio com o mesmo numero do usuario, se esse numero estiver livre
+        # grupo proprio com o mesmo numero do usuario, se esse numero tiver livre
         gid = uid if uid not in group_ids else self._free_id(group_ids)
         user = User(name, uid, gid, f"/home/{name}")
         hashed = hash_password(password)
 
-        # a home vem primeiro: se ja existir algo com esse nome, falha aqui
-        # sem ter mexido nas contas
+        # a home vem primeiro: se ja existir alguma coisa com esse nome, falha
+        # aqui, antes de mexer nas contas
         with self.fs.as_root():
             num = self.fs.mkdir(user.home)
             self.fs.set_attrs(num, owner_uid=uid, gid=gid, perm=PERM_600)
@@ -285,8 +289,8 @@ class Accounts:
         self.hashes[name] = hashed
         self.groups[name] = Group(name, gid)
         try:
-            # shadow antes do passwd: nunca fica um usuario no passwd sem
-            # senha no shadow
+            # shadow antes do passwd: assim nunca fica um usuario no passwd
+            # sem senha no shadow
             self._save([SHADOW_PATH, GROUP_PATH, PASSWD_PATH], backup)
         except FSError:
             with self.fs.as_root():
@@ -296,8 +300,8 @@ class Accounts:
 
     def change_password(self, name: str, new_password: str,
                         current_password: Optional[str] = None) -> None:
-        """passwd: o usuario troca a propria senha informando a atual; o
-        root troca a de qualquer um sem precisar da atual."""
+        """passwd: o usuario troca a propria senha dizendo a atual; o root
+        troca a de qualquer um sem precisar da atual."""
         user = self.get_user(name)
         if self.fs.uid != ROOT_UID:
             if user.uid != self.fs.uid:
@@ -313,8 +317,8 @@ class Accounts:
 
     def set_locked(self, name: str, locked: bool) -> None:
         """passwd -l / passwd -u: bloqueia ou desbloqueia a conta. O hash
-        continua guardado (com "!" na frente), entao desbloquear devolve a
-        mesma senha de antes."""
+        continua guardado (so ganha um "!" na frente), entao desbloquear volta
+        a mesma senha de antes."""
         self.require_root("passwd -l" if locked else "passwd -u")
         self.get_user(name)
         if locked and name == "root":

@@ -114,7 +114,7 @@ class Inode:
             self.owner_uid,
             self.gid,
             self.creator_uid,
-            b"",  # reservado (struct completa com zeros)
+            b"",  # os 20B reservados: o struct completa com zeros sozinho
             self.size,
             self.created_at,
             self.modified_at,
