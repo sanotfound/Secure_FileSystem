@@ -460,7 +460,7 @@ também é trocado pela home (no bash, `~` entre aspas não seria trocado).
 |---|---|---|
 | 1 | Usuários, senhas e login | concluída |
 | 2 | Controle de acesso (checagem de r/w em todas as operações) | concluída |
-| 3 | `chmod`, `chown` e `chgrp` | planejada |
+| 3 | `chmod`, `chown` e `chgrp` | concluída |
 | 4 | Grupos (`groupadd`, `usermod -aG`, `gpasswd -d`) e `sudo` | planejada |
 | 5 | README e verificação completa | planejada |
 | 6 | Pasta `tests/` com testes automatizados | planejada |
@@ -863,10 +863,186 @@ de cada arquivo foi comparada com a da cópia, ignorando as docstrings
 idêntica. Os testes das Etapas 1 e 2 foram repetidos e deram os mesmos
 resultados.
 
-### Etapas 3 a 6 (planejadas)
+### Etapa 3 — `chmod`, `chown` e `chgrp` (concluída)
 
-- **Etapa 3 — `chmod`, `chown` e `chgrp`:** regras e sintaxes da seção 2.5;
-  aplicados a links, agem no alvo.
+**Objetivo:** dar aos usuários os comandos para mudar permissões, dono e
+grupo, seguindo as regras da seção 2.5. É a parte do enunciado que pede
+`chmod` e `chown` explicitamente.
+
+#### Planejamento (anotado antes da implementação)
+
+**O que será implementado:**
+- **`fs/permissions.py`** — leitura do modo do `chmod`, devolvendo o byte de
+  permissões novo:
+  - **numérico:** exatamente 3 dígitos (dono, grupo, outros), cada um 0, 2,
+    4 ou 6 (r = 4, w = 2). Ex.: `640` → `rwr---`. Dígito ímpar (que teria o
+    x) ou maior que 7 é recusado com mensagem explicando o motivo;
+  - **simbólico:** uma ou mais cláusulas separadas por vírgula, cada uma com
+    quem (`u` dono, `g` grupo, `o` outros, `a` todos; vazio = todos), uma
+    operação (`+` acrescenta, `-` tira, `=` define exatamente) e as letras
+    (`r`, `w`). Ex.: `o-r`, `u+w`, `g=r`, `u=rw,g=r,o=`. A letra `x` é
+    recusada.
+- **`fs/accounts.py`:** consulta de grupo pelo nome (`get_group`), com
+  erro se o grupo não existir.
+- **`fs/filesystem.py`** — três operações do kernel:
+
+  | Operação | Quem pode | O que muda |
+  |---|---|---|
+  | `chmod(caminho, modo)` | o dono ou o root | só as permissões |
+  | `chown(caminho, dono, grupo)` | só o root | o dono e/ou o grupo |
+  | `chgrp(caminho, grupo)` | o root, ou o dono se for membro do grupo de destino | só o grupo |
+
+  As três seguem links (agem no alvo, seção 2.10) e passam pela resolução
+  de caminhos normal (atravessar exige `r`). O campo "criador" nunca muda.
+- **`fs/shell.py`:** os comandos `chmod <modo> <arquivo...>`,
+  `chown <dono>[:<grupo>] <arquivo...>` (também `chown :<grupo>`) e
+  `chgrp <grupo> <arquivo...>`, aceitando vários arquivos de uma vez, como
+  no Linux; e o texto do `help`.
+
+**Mensagens de erro (como no Linux):**
+- "Permissão negada" continua sendo quando faltam os bits `r`/`w`;
+- **"Operação não permitida"** é quando a operação exige ser o dono ou o root
+  e a pessoa não é (ex.: `chmod` no arquivo de outra pessoa). O Linux faz a
+  mesma distinção.
+
+**O que será alterado:** nada do que já existe muda de comportamento; a
+etapa só acrescenta operações.
+
+**O que será removido:** nada.
+
+**Por quê:** é exigência direta do enunciado. As regras de quem pode usar
+cada comando foram decididas na seção 2.5:
+- `chown` só para o root, para impedir que alguém "dê" um arquivo a outra
+  pessoa;
+- `chgrp` só para grupos de que o dono participa, para ninguém "jogar"
+  arquivos num grupo do qual não faz parte;
+- `chmod` para o dono, que é quem controla o próprio arquivo.
+
+**Testes planejados:**
+- todas as formas do `chmod` (numérico, simbólico, várias cláusulas, `=`
+  vazio, sem "quem") e os modos inválidos (`755`, `7`, `999`, `u+x`, `abc`);
+- usuário comum tentando `chmod`, `chown` e `chgrp` no `/etc/shadow` e no
+  `/etc/passwd` (fecha as tentativas da seção 2.2 que faltavam);
+- `chown` e `chgrp` em arquivo próprio para outro usuário ou para um grupo
+  do qual a pessoa não faz parte;
+- `chmod` em um link mudando o alvo;
+- depois de um `chown`, o antigo dono deixa de poder usar `chmod`, e o
+  "criador" continua o mesmo;
+- o cenário completo de pasta compartilhada pelo shell: o root cria o grupo
+  (editando o `/etc/group`, já que o `groupadd` é da Etapa 4), cria a pasta,
+  faz `chown ana:alunos` e `chmod 660`; o bruno cria um arquivo e faz
+  `chgrp alunos`; a ana lê;
+- a limitação da seção 3.4 (um membro apaga o arquivo de outro numa pasta
+  compartilhada), para confirmar que o comportamento é o documentado;
+- grupo próprio + padrão 640: a ana abre a home (`chmod 644 ~`); os outros
+  passam a listar a home, mas continuam sem ler os arquivos.
+
+#### O que foi implementado
+
+**`fs/permissions.py`**
+- `parse_mode(modo, permissão_atual)`: decide se o modo é numérico (só
+  dígitos) ou simbólico e devolve o byte de permissões novo.
+- `_numeric_mode`: exige 3 dígitos. Cada dígito é convertido nos 2 bits da
+  classe com `dígito >> 1` (6 → `11` rw, 4 → `10` r, 2 → `01` w, 0 → `00`)
+  e posicionado no lugar da classe (dono, grupo, outros). Dígitos ímpares
+  (que no Linux incluiriam o x) e maiores que 7 são recusados, cada um com
+  sua mensagem.
+- `_symbolic_mode`: separa as cláusulas pela vírgula e aplica cada uma em
+  cima do resultado da anterior, começando da permissão atual. Cada cláusula
+  é validada por uma expressão regular (quem, operação, letras):
+  - **`+`** liga os bits pedidos (OU bit a bit);
+  - **`-`** desliga os bits pedidos (E com a negação);
+  - **`=`** zera os 2 bits da classe e liga só os pedidos (`o=` sozinho tira
+    tudo dos outros).
+
+  Sem "quem", a cláusula vale para todas as classes (`+w` = `a+w`). A letra
+  `x` é aceita pela expressão regular só para poder ser recusada com uma
+  mensagem clara.
+- Tabelas `WHO_SHIFTS` (letra de quem → posição da classe no byte) e
+  `LETTER_BITS` (letra de permissão → bit).
+
+**`fs/accounts.py`**
+- `get_group(nome)`: devolve o grupo ou dá o erro "grupo 'x' não existe".
+
+**`fs/filesystem.py`**
+- `chmod(caminho, modo)`: resolve o caminho (seguindo links), calcula a
+  permissão nova (um modo inválido dá erro antes de qualquer outra coisa),
+  confere se quem pede é o dono ou o root e grava.
+- `chown(caminho, dono, grupo)`: converte os nomes em UID/GID antes de
+  tudo (um nome inexistente dá erro sem mexer em nada), resolve o caminho,
+  exige root e grava dono e/ou grupo.
+- `chgrp(caminho, grupo)`: converte o nome em GID, resolve o caminho e
+  aceita se quem pede é root, ou se é o dono **e** faz parte do grupo de
+  destino.
+- Nenhum dos três altera o campo "criador" nem a data de modificação (o
+  conteúdo do arquivo não muda).
+
+**`fs/shell.py`**
+- `chmod <modo> <arquivo...>`, `chown <dono>[:<grupo>] <arquivo...>`,
+  `chown :<grupo> <arquivo...>` e `chgrp <grupo> <arquivo...>`, todos
+  aceitando vários arquivos.
+- O argumento do `chown` é separado no `:`: `ana` muda só o dono,
+  `ana:alunos` muda os dois, `:alunos` muda só o grupo. `ana:` (dois-pontos
+  sem grupo) é recusado com a mensagem de uso.
+- Nova seção "Permissões" no `help`.
+
+#### Detalhes definidos durante a implementação
+
+1. **`chown ana:` não é aceito.** No Linux, isso significaria "dono ana e o
+   grupo de login dela". Foi deixado de fora por simplicidade, e a forma
+   recusada mostra a mensagem de uso.
+2. **O `chmod` numérico exige exatamente 3 dígitos.** O Linux aceita menos
+   (`chmod 6` = `006`), mas aqui a regra fixa evita ambiguidade.
+3. **Ordem das conferências:** primeiro a validação do pedido (modo, nomes de
+   usuário e de grupo), depois a resolução do caminho e por último quem pode
+   fazer. Assim, um erro de digitação aparece como erro de digitação, e nada
+   é alterado antes de todas as conferências passarem.
+
+Não houve mudanças em relação ao planejamento.
+
+#### Testes realizados
+
+Leitura do modo (25 casos, a partir de `-rwr---`):
+
+| Modo | Resultado |
+|---|---|
+| `640`, `644`, `600`, `666`, `000`, `062` | `-rwr---`, `-rwr-r-`, `-rw----`, `-rwrwrw`, `-------`, `---rw-w` |
+| `o-r`, `o+r`, `u-w`, `g=rw`, `a=r` | `-rwr---`, `-rwr-r-`, `-r-r---`, `-rwrw--`, `-r-r-r-` |
+| `u=rw,g=r,o=`, `+w`, `-r`, `ug+w`, `a-rw`, `go=` | `-rwr---`, `-rwrw-w`, `--w----`, `-rwrw--`, `-------`, `-rw----` |
+| `755`, `u+x` | recusados: "aqui não existe x" |
+| `7`, `6400`, `999`, `abc`, vazio, `u=rw,x` | recusados: modo inválido |
+
+Pelo shell:
+
+| Caso | Resultado |
+|---|---|
+| A ana usa `chmod` nos próprios arquivos (numérico, simbólico, vários arquivos de uma vez) | funciona; `ls -l` mostra cada mudança |
+| Depois de `chmod u=r,g=,o=`, a ana tenta escrever | Permissão negada; depois de `chmod u+w`, volta a escrever |
+| `chmod 640 link` | o alvo muda; o link continua `lrwrwrw` |
+| A ana usa `chmod` no `/etc/shadow` (`666`, `o+r`) e no `/etc/passwd` | Operação não permitida |
+| A ana usa `chown ana`, `chown ana:ana` e `chgrp ana` no `/etc/shadow` | Operação não permitida; o shadow continua ilegível |
+| A ana tenta `chown bruno` no próprio arquivo | Operação não permitida (só root) |
+| A ana tenta `chgrp sudo` (não é membro) / `chgrp ana` (é membro) no próprio arquivo | negado / permitido |
+| Grupo ou usuário inexistente; `chown ana:` | mensagens "não existe" / uso |
+| A ana faz `chmod 644 ~` | o bruno lista a home dela, mas `cat` no arquivo `-rwr---` dá Permissão negada ("seu acesso: --") |
+| O root faz `chown bruno` num arquivo da ana | o dono vira bruno, o criador continua ana; a ana perde o `chmod` (Operação não permitida) |
+| Pasta compartilhada: o root acrescenta `alunos:x:1100:ana,bruno` ao `/etc/group`, cria `/home/projeto`, faz `chown ana:alunos` e `chmod 660` | `id` do bruno já mostra o grupo `alunos` |
+| O bruno cria `b.txt` na pasta (nasce com o grupo `bruno`) e faz `chgrp alunos` | a ana lê o arquivo ("seu acesso: r-, membro do grupo alunos") |
+| A carla (fora do grupo) lista a pasta / faz `chgrp alunos` na própria home | Permissão negada / Operação não permitida |
+| Limitação 3.4: o bruno copia o `a.txt` da ana, apaga o original e põe a cópia no lugar | acontece, como documentado; o `stat` mostra dono e criador `bruno` |
+
+Os testes das Etapas 1 e 2 foram repetidos e continuam passando.
+
+#### Situação ao final da etapa
+
+- O `/etc/shadow` está protegido contra todas as tentativas listadas na
+  seção 2.2, incluindo `chmod`, `chown` e `chgrp`.
+- Por enquanto, criar grupos exige editar o `/etc/group` à mão (como root);
+  os comandos `groupadd`, `usermod -aG` e `gpasswd -d`, e o `sudo`, são da
+  Etapa 4.
+
+### Etapas 4 a 6 (planejadas)
+
 - **Etapa 4 — Grupos e `sudo`:** `groupadd`, `usermod -aG`, `gpasswd -d`;
   `sudo` conforme a seção 2.7.
 - **Etapa 5 — Fechamento:** README atualizado e verificação completa

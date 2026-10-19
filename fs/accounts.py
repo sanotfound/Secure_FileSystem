@@ -163,6 +163,12 @@ class Accounts:
             raise FSError(f"usuário '{name}' não existe")
         return user
 
+    def get_group(self, name: str) -> Group:
+        group = self.groups.get(name)
+        if group is None:
+            raise FSError(f"grupo '{name}' não existe")
+        return group
+
     def user_by_uid(self, uid: int) -> Optional[User]:
         for user in self.users.values():
             if user.uid == uid:

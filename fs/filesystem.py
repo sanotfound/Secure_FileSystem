@@ -57,7 +57,7 @@ from fs.constants import (
 )
 from fs.disk import Disk
 from fs.errors import FSError
-from fs.permissions import effective_access
+from fs.permissions import effective_access, parse_mode
 from fs.structs import DirEntry, Inode, SuperBlock
 
 # o que a formatacao cria alem da raiz (que e 644): /etc e /home todo mundo
@@ -1040,6 +1040,48 @@ class FileSystem:
             raise FSError(f"{path}: não é um diretório")
         self._require(inode, PERM_R, path)  # entrar no diretorio = atravessar, precisa de r
         self.cwd_inode = num
+
+    # ---- chmod, chown, chgrp ----
+    #
+    # Os tres seguem link (mexem no alvo, igual no Linux) e passam pela
+    # resolucao normal do caminho, entao atravessar continua exigindo r. Aqui
+    # a regra nao e r/w, e sim QUEM e a pessoa (dono ou root); por isso o
+    # erro e "Operacao nao permitida" e nao "Permissao negada" -- o Linux
+    # tambem separa as duas coisas. O "criador" nunca muda.
+
+    def chmod(self, path: str, mode: str) -> None:
+        num = self.resolve(path)
+        inode = self.read_inode(num)
+        new_perm = parse_mode(mode, inode.perm)  # modo invalido da erro antes de tudo
+        # so o dono (ou o root) mexe nas permissoes: e o dono que decide
+        # quem pode ler e escrever no que e dele
+        if self.uid != ROOT_UID and inode.owner_uid != self.uid:
+            raise FSError(f"chmod: {path}: Operação não permitida")
+        self.set_attrs(num, perm=new_perm)
+
+    def chown(self, path: str, owner: Optional[str], group: Optional[str]) -> None:
+        # pega os numeros antes, pra um nome errado dar "nao existe" sem
+        # mexer em nada
+        uid = self.accounts.get_user(owner).uid if owner else None
+        gid = self.accounts.get_group(group).gid if group else None
+        num = self.resolve(path)
+        # trocar o dono e so do root, igual no Linux: senao a ana podia
+        # "dar" um arquivo pro bruno (pra incriminar ele, ou deixar com ele
+        # uma coisa que ele nem controla)
+        if self.uid != ROOT_UID:
+            raise FSError(f"chown: {path}: Operação não permitida")
+        self.set_attrs(num, owner_uid=uid, gid=gid)
+
+    def chgrp(self, path: str, group: str) -> None:
+        gid = self.accounts.get_group(group).gid
+        num = self.resolve(path)
+        inode = self.read_inode(num)
+        # o root pode tudo; o dono so pode passar o arquivo pra um grupo do
+        # qual ele faz parte. Senao dava pra "jogar" arquivo num grupo alheio,
+        # ex.: fazer um arquivo aparecer como sendo do grupo rh
+        if self.uid != ROOT_UID and (inode.owner_uid != self.uid or gid not in self.group_ids()):
+            raise FSError(f"chgrp: {path}: Operação não permitida")
+        self.set_attrs(num, gid=gid)
 
     def usage(self) -> dict:
         return {

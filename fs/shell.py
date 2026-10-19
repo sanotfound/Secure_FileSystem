@@ -2,8 +2,9 @@
 Shell interativo (REPL) que expõe os comandos exigidos no trabalho:
 touch, rm, echo (> e >>), cat, cp, mv, ln -s, mkdir, rmdir, ls, cd
 Mais alguns comandos de apoio (pwd, stat, df, help, reset) uteis para
-demonstrar persistencia e uso do disco, e os comandos de usuarios (login,
-useradd, passwd, su, logout, whoami, id, users, groups).
+demonstrar persistencia e uso do disco, os comandos de usuarios (login,
+useradd, passwd, su, logout, whoami, id, users, groups) e os de permissao
+(chmod, chown, chgrp).
 
 O shell so conversa com a pessoa (le comando, pede senha, mostra o
 resultado). Quem decide se pode ou nao e o "kernel" (FileSystem e
@@ -273,6 +274,28 @@ class Shell:
         elif cmd == "reset":
             return self._reset()
 
+        elif cmd == "chmod":
+            if len(args) < 2:
+                raise FSError("uso: chmod <modo> <arquivo...>  (ex.: chmod 640 a.txt, chmod o-r a.txt)")
+            for p in args[1:]:
+                fs.chmod(p, args[0])
+
+        elif cmd == "chown":
+            if len(args) < 2:
+                raise FSError("uso: chown <dono>[:<grupo>] <arquivo...>  ou  chown :<grupo> <arquivo...>")
+            # "ana" so dono, "ana:alunos" dono e grupo, ":alunos" so grupo
+            owner, sep, group = args[0].partition(":")
+            if (sep and not group) or not (owner or group):
+                raise FSError("uso: chown <dono>[:<grupo>] <arquivo...>  ou  chown :<grupo> <arquivo...>")
+            for p in args[1:]:
+                fs.chown(p, owner or None, group or None)
+
+        elif cmd == "chgrp":
+            if len(args) < 2:
+                raise FSError("uso: chgrp <grupo> <arquivo...>")
+            for p in args[1:]:
+                fs.chgrp(p, args[0])
+
         elif cmd == "useradd":
             if len(args) != 1:
                 raise FSError("uso: useradd <usuário>")
@@ -464,6 +487,12 @@ class Shell:
     ls [-l] [dir]                  lista o diretório (-l: permissões, dono, grupo...)
     cd [dir]                       muda o diretório atual (sem argumento: home)
     pwd                            mostra o diretório atual
+  Permissões:
+    chmod <modo> <arquivo...>      muda as permissões (dono ou root)
+                                   modo: 640 (r=4, w=2) ou u+w, o-r, g=r, u=rw,o=
+    chown <dono>[:<grupo>] <arq..> muda o dono e/ou o grupo (só root)
+    chown :<grupo> <arquivo...>    muda só o grupo (só root)
+    chgrp <grupo> <arquivo...>     muda o grupo (root, ou dono que é do grupo)
   Usuários:
     useradd <usuário>              cria usuário, grupo próprio e home (só root)
     passwd [usuário]               troca a senha (de outro usuário: só root)
