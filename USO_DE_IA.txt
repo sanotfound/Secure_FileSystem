@@ -1,0 +1,224 @@
+Declaração de uso de Inteligência Artificial
+
+RESUMO
+
+A IA foi usada para discussão das decisões, documentação, verificação/teste de casos e escrita do código. As ideias vieram tanto do grupo quanto da IA, mas nada foi implementado sem ser discutido, avaliado pelos critérios do grupo e aprovado: os objetivos, critérios e decisões foram inicialmente discutidos, analisados e verificados, e só eram aprovados (no sentido de dar continuidade ao planejamento) se aquilo, no contexto do projeto, fosse a melhor solução (ou uma das melhores).
+
+
+- 1. Planejamento e decisões de projeto
+
+	a) Planejamento e decisões
+
+	A IA foi usada para planejar o projeto e discutir cada decisão. Ela
+	leu o código existente, listou o que o enunciado exigia e, para cada
+	decisão que o grupo apresentava, apresentou as opções possíveis, as
+	vantagens, as desvantagens e uma recomendação. O grupo analisava, tirava
+	dúvidas, pedia alternativas, mudava ou rejeitava propostas e só então
+	aprovava.
+
+	A divisão do trabalho consistiu em 6 etapas principais
+	(usuários e senhas; controle de acesso; chmod/chown/chgrp; grupos e sudo;
+	revisão; testes automatizados).
+	A **forma** do planejamento foi proposta pela IA e aprovada pelo grupo.
+	Antes de cada etapa, o planejamento proposto pela IA, caso fosse aprovado,
+	era anotado em um relatório com regras definidas.
+
+	Origem das ideias:
+
+	Partiram do grupo:
+	  1. os critérios usados para avaliar as decisões:
+	     tríade CIA, menor privilégio, separação de tarefas e simplicidade;
+	  2. grupos (três classes: dono, grupo e outros), exibidos no formato
+	     "drwrwrw", sem o x;
+	  3. a escolha do scrypt no lugar do PBKDF2 (ver abaixo);
+	  4. aproximar o comportamento geral do Linux (apenas alguns exemplos:
+	     a) chown só para o root (pelo sudo);
+	     b) /etc/passwd + /etc/shadow dentro do próprio sistema de arquivos;
+	     c) atravessar um diretório exigir "r";
+	     d) grupo próprio para cada usuário;
+	     ...);
+	  5. o relatório de acompanhamento e uma pasta de testes automatizados
+	     após o "fim" do trabalho.
+
+	Propostas pela IA e aprovadas pelo grupo:
+	  1. os parâmetros do scrypt (N=2^17, r=8, p=1);
+	  2. dono e grupo guardados como números (UID/GID);
+	  3. classes exclusivas (dono, depois grupo, depois outros);
+	  4. sudo com o /etc/sudoers aceitando %grupos;
+	  5. as regras do chgrp;
+	  6. arquivo novo com o grupo de quem o criou e permissão padrão 640;
+	  7. as permissões da cópia no cp.
+
+	Propostas que mudaram depois da discussão:
+	  - a IA recomendou primeiro o PBKDF2. O grupo argumentou que atacantes
+	    reais não testam senhas uma por uma: usam ferramentas automatizadas
+	    que fazem várias tentativas em paralelo (por exemplo, o Hydra contra
+	    serviços online, ou o hashcat contra um arquivo de senhas vazado,
+	    usando GPU). O PBKDF2 só gasta tempo e não atrapalha esse
+	    paralelismo. O scrypt também gasta memória (128 MiB por tentativa),
+	    o que limita quantas tentativas rodam ao mesmo tempo. Por isso, e
+	    também como desafio, o grupo optou pelo scrypt;
+	  - o grupo dos arquivos novos passou da regra do BSD (grupo do
+	    diretório) para a do Linux (grupo de quem cria), e o sudo passou de
+	    "lembrar a senha por 5 minutos" para "pedir a senha sempre", as duas
+	    mudanças depois de avaliar as opções com os critérios estabelecidos
+	    pelo grupo.
+
+	Propostas da IA que foram rejeitadas:
+	  1. registro de auditoria (log), por estar fora do escopo pedido;
+	  2. política de senha com tamanho mínimo, por ser desnecessária num
+	     ambiente controlado.
+
+	b) Qual a finalidade de tudo isso?
+
+	O objetivo foi ter uma organização melhor durante o desenvolvimento e
+	mais clareza para fazer escolhas conscientes e eficientes.
+
+	c) Exemplos de instruções que foram direcionadas à IA:
+
+	Exemplo 1:
+	"Quais as vantagens, desvantagens e o impacto de gerar o hash
+	com PBKDF2 ou com scrypt? Quais outras soluções existem?"
+
+	A IA comparou SHA-256, SHA-256 com salt, PBKDF2, scrypt, bcrypt e
+	Argon2id, mediu o custo na máquina de um dos integrantes
+	(PBKDF2: 0,29 s; scrypt: 0,60 s e 128 MiB de memória) e explicou o que
+	esse custo significa para quem faz login e para um atacante com GPU.
+	O grupo escolheu o scrypt.
+
+	Exemplo 2:
+	"Se eu fizer de tal jeito, isso segue a tríade CIA, o menor
+	privilégio, a separação de tarefas e a simplicidade?"
+
+	Ao reavaliar as decisões pendentes com esses critérios, a IA mudou duas
+	recomendações (grupo dos arquivos novos e senha do sudo) e apontou
+	decisões que ainda não tinham sido discutidas (permissão padrão de
+	arquivos novos, bloqueio de contas, pasta compartilhada sem sticky bit).
+
+
+- 2. Implementação do código e verificação
+
+	a) Escrita do código
+
+	Nada foi implementado por iniciativa própria da IA. 
+	a IA foi usada para:
+	  - apontar problemas que o grupo não tinha percebido e propor soluções.
+	    Exemplo: o "sudo su" não teria efeito, porque o sudo devolve as
+	    credenciais ao fim do comando; a solução proposta foi um contador de
+	    trocas de usuário;
+	  - revisar o código em busca de erros de lógica, exceções não tratadas
+	    e inconsistências. Exemplo: na revisão da Etapa 5, um Ctrl+C durante
+	    um comando que pede senha derrubava o programa;
+	  - servir de ponto de partida quando o grupo "travava" em alguma parte.
+	    Exemplo: "Como eu posso implementar o scrypt e quais tipos de
+	    estruturas seriam as mais adequadas, e por quê? Justifique".
+
+	Apesar de a **estrutura** do planejamento (6 etapas) ter partido da IA,
+	o conteúdo de cada etapa e as decisões sobre o que seria de fato
+	implementado partiram do grupo.
+
+	b) Erros encontrados pela IA: a própria IA encontrou os erros ao testar
+	cada etapa e os corrigiu antes de entregar a etapa para a revisão do
+	grupo.
+	  - Etapa 1: a formatação do disco passou a criar diretórios e usava o
+	    diretório atual antes de ele ser definido (AttributeError). Foi
+	    corrigido definindo o diretório atual no início.
+	  - Etapa 1: o useradd pedia a senha antes de conferir se o nome era
+	    válido. Foi criada uma conferência anterior.
+	  - Etapa 5 (revisão do código inteiro): um Ctrl+C durante um comando
+	    que pede senha derrubava o programa, e a entrada acabando no meio de
+	    um comando gerava "erro inesperado". Os dois casos passaram a ser
+	    tratados. Também foi corrigida uma mensagem ("senha não alterada")
+	    que aparecia em situações erradas.
+	  - Os próprios testes da IA também tiveram erros, corrigidos em
+	    seguida. Por exemplo, um teste de "mudança de grupo" usava um arquivo
+	    do qual o usuário era dono, então não provava nada.
+
+	Sugestões que não foram implementadas, e por quê:
+	  - registro de auditoria e política de senha: rejeitados pelo grupo;
+	  - criptografia do disco inteiro: fora do foco do trabalho; exigiria
+	    uma biblioteca externa e uma senha mestra;
+	  - sudo restrito por comando: fácil de usar para virar root (por
+	    exemplo, quem pode rodar passwd troca a senha do root);
+	  - sticky bit: uma boa ideia que foi deixada de fora por simplicidade,
+	    e a limitação ficou documentada;
+	  - userdel e groupdel: deixariam arquivos com dono ou grupo
+	    inexistente.
+
+	c) Verificação de cada etapa: a IA testou cada etapa com discos de
+	teste fora do repositório e, a cada etapa nova, repetiu os testes das
+	anteriores. Na Etapa 5, rodou um roteiro completo de ponta a ponta (34
+	conferências). Na Etapa 6, escreveu 91 testes automatizados e conferiu
+	que eles falham quando o sistema é estragado de propósito. Com isso, o
+	grupo podia passar de uma etapa para a outra com mais confiança.
+
+	d) Exemplos de detalhes técnicos:
+	  - mudança do i-node: dono e criador passaram de texto para números
+	    (UID/GID), com 20 bytes de reserva para manter os 128 bytes;
+	  - o byte de permissões com 2 bits por classe (00 rw rw rw) e os
+	    deslocamentos de bits para ler cada par: no chmod numérico, o dígito
+	    vira o par de bits com "dígito >> 1" e vai para a posição da classe
+	    com "<< 4", "<< 2" ou "<< 0";
+	  - chmod simbólico com operações de bits: OU para ligar, E com a
+	    negação para desligar;
+	  - hash + salt com scrypt: parâmetros, limite de memória do OpenSSL,
+	    comparação em tempo constante (hmac.compare_digest) e um hash "falso"
+	    para usuário inexistente, para o tempo de resposta não revelar quais
+	    contas existem;
+	  - o "modo kernel" (as_root) e o sudo como gerenciadores de contexto
+	    (with), que devolvem as credenciais mesmo em caso de erro, e o
+	    contador de trocas de usuário que faz o "sudo su" funcionar;
+	  - gravação "tudo ou nada" dos arquivos de contas quando o disco enche;
+	  - nova identificação do disco (SOF2) para recusar discos no formato
+	    antigo.
+
+
+- 3. Esclarecimento de lacunas e de conceitos
+
+	a)
+	Lacunas no código do trabalho anterior, encontradas pela IA ao
+	analisar o código no início: as permissões eram guardadas no i-node,
+	mas nenhuma operação as conferia; qualquer usuário podia apagar o disco
+	inteiro com reset; o dono era guardado como texto; o usuário atual vinha
+	de uma opção de linha de comando, sem senha; não havia root, homes nem
+	arquivo de senhas.
+
+	Lacunas encontradas durante este trabalho, e a solução escolhida:
+	  - o "sudo su" não teria efeito, porque o sudo devolve as credenciais
+	    ao final do comando. Solução: um contador de trocas de usuário.
+	    Encontrado ao planejar a Etapa 4, antes de implementar;
+	  - o mv respondia "já existe" antes de conferir a permissão, o que
+	    revelava o conteúdo de diretórios protegidos. Solução: a checagem
+	    passou a vir antes;
+	  - a proteção vale dentro do sistema, mas não para quem abre o
+	    disco.img direto no sistema operacional. Documentado como limitação
+	    (o hash continua protegendo as senhas);
+	  - numa pasta compartilhada, um membro de um grupo pode apagar ou mover
+	    arquivos de outro (não há sticky bit). Documentado;
+	  - "sudo echo x > arq" grava como root, diferente do bash. Documentado.
+
+	b) Dúvidas de conceito que a IA nos ajudou a esclarecer:
+	  - a diferença entre criptografia e hash, e por que hash + salt atende
+	    à confidencialidade das senhas;
+	  - o que significam "0,60 s e 128 MiB" no custo do scrypt, e por que
+	    gastar memória atrapalha ataques com GPU;
+	  - cenários de exemplo sobre como funcionam dono, grupo e outros;
+	  - a diferença entre su e sudo, e entre lembrar a senha do sudo por um
+	    tempo ou pedir sempre;
+	  - por que as permissões de um link simbólico são ignoradas;
+	  - o que copiar e depois apagar um arquivo numa pasta compartilhada
+	    permite ou não.
+
+
+- 4. Documentação e legibilidade
+
+	a)
+	O relatório de acompanhamento (Relatório.md) foi redigido pela IA: antes
+	de cada etapa, ela anotava o planejamento aprovado pelo grupo; ao final,
+	o que foi feito de fato e como foi testado. As anotações feitas pelo
+	grupo eram incorporadas e reescritas pela IA em uma formatação mais
+	técnica. O README também foi reescrito pela IA na Etapa 5, para
+	descrever o sistema atual.
+
+	b) Este arquivo: o rascunho dos tópicos foi do grupo; os detalhes e os
+	exemplos foram completados pela IA a partir do histórico do trabalho.
