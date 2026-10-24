@@ -2,7 +2,9 @@ Declaração de uso de Inteligência Artificial
 
 RESUMO
 
-A IA foi usada para discussão das decisões, documentação, verificação/teste de casos e escrita do código. As ideias vieram tanto do grupo quanto da IA, mas nada foi implementado sem ser discutido, avaliado pelos critérios do grupo e aprovado: os objetivos, critérios e decisões foram inicialmente discutidos, analisados e verificados, e só eram aprovados (no sentido de dar continuidade ao planejamento) se aquilo, no contexto do projeto, fosse a melhor solução (ou uma das melhores).
+A IA foi usada para discutir as decisões, auxiliar e revisar a implementação, depurar o código e redigir a documentação. O planejamento de cada etapa foi discutido entre o grupo e a IA, e só seguia adiante o que o grupo aprovava pelos seus critérios (tríade CIA, menor privilégio, separação de tarefas e simplicidade).
+
+A implementação partia do grupo: o grupo tentava implementar o que tinha sido decidido e, quando travava (por exemplo, em como usar o scrypt para gerar o hash), usava a IA como auxiliar. Ao final de cada etapa, antes de seguir para a próxima, o grupo revisava com a IA o que tinha implementado: a IA testava, apontava erros e reescrevia ou ajustava ("lapidava") os trechos, principalmente os mais complexos, para reduzir erros. Os trechos que a IA mais reescreveu estão listados no item 2a.
 
 
 - 1. Planejamento e decisões de projeto
@@ -100,26 +102,33 @@ A IA foi usada para discussão das decisões, documentação, verificação/test
 
 	a) Escrita do código
 
-	Nada foi implementado por iniciativa própria da IA. 
-	a IA foi usada para:
-	  - apontar problemas que o grupo não tinha percebido e propor soluções.
-	    Exemplo: o "sudo su" não teria efeito, porque o sudo devolve as
-	    credenciais ao fim do comando; a solução proposta foi um contador de
-	    trocas de usuário;
-	  - revisar o código em busca de erros de lógica, exceções não tratadas
-	    e inconsistências. Exemplo: na revisão da Etapa 5, um Ctrl+C durante
-	    um comando que pede senha derrubava o programa;
-	  - servir de ponto de partida quando o grupo "travava" em alguma parte.
-	    Exemplo: "Como eu posso implementar o scrypt e quais tipos de
-	    estruturas seriam as mais adequadas, e por quê? Justifique".
+	O código foi escrito primeiro pelo grupo e depois revisado e lapidado
+	com a IA. Os trechos que a IA mais reescreveu foram:
+	  - fs/permissions.py, de forma geral (regra de permissão, formato do
+	    ls -l e leitura do modo do chmod);
+	  - fs/passwords.py, as funções _scrypt, hash_password e
+	    verify_password.
+
+	Além disso, a IA foi usada para:
+	  - ajudar quando o grupo travava em alguma parte. Exemplo: "Como eu
+	    posso implementar o scrypt e quais tipos de estruturas seriam as
+	    mais adequadas, e por quê? Justifique";
+	  - revisar o código de cada etapa em busca de erros de lógica,
+	    exceções não tratadas e inconsistências. Exemplo: na revisão da
+	    Etapa 5, um Ctrl+C durante um comando que pede senha derrubava o
+	    programa;
+	  - apontar problemas que o grupo não tinha percebido e propor
+	    soluções. Exemplo: o "sudo su" não teria efeito, porque o sudo
+	    devolve as credenciais ao fim do comando; a solução proposta foi um
+	    contador de trocas de usuário.
 
 	Apesar de a **estrutura** do planejamento (6 etapas) ter partido da IA,
 	o conteúdo de cada etapa e as decisões sobre o que seria de fato
 	implementado partiram do grupo.
 
-	b) Erros encontrados pela IA: a própria IA encontrou os erros ao testar
-	cada etapa e os corrigiu antes de entregar a etapa para a revisão do
-	grupo.
+	b) Erros encontrados na revisão com a IA: ao final de cada etapa, a IA
+	testou o que o grupo tinha implementado e apontou os erros abaixo,
+	que foram corrigidos antes de seguir para a próxima etapa.
 	  - Etapa 1: a formatação do disco passou a criar diretórios e usava o
 	    diretório atual antes de ele ser definido (AttributeError). Foi
 	    corrigido definindo o diretório atual no início.
@@ -145,12 +154,14 @@ A IA foi usada para discussão das decisões, documentação, verificação/test
 	  - userdel e groupdel: deixariam arquivos com dono ou grupo
 	    inexistente.
 
-	c) Verificação de cada etapa: a IA testou cada etapa com discos de
-	teste fora do repositório e, a cada etapa nova, repetiu os testes das
+	c) Verificação e depuração: a cada etapa, a IA testou o sistema com
+	discos de teste fora do repositório e repetiu os testes das etapas
 	anteriores. Na Etapa 5, rodou um roteiro completo de ponta a ponta (34
-	conferências). Na Etapa 6, escreveu 91 testes automatizados e conferiu
-	que eles falham quando o sistema é estragado de propósito. Com isso, o
-	grupo podia passar de uma etapa para a outra com mais confiança.
+	conferências). Depois de terminada a implementação (Etapa 6), a IA foi
+	usada como ferramenta de depuração: escreveu 91 testes automatizados e
+	conferiu que eles falham quando o sistema é estragado de propósito. O
+	objetivo foi encontrar lacunas que as revisões de cada etapa não tinham
+	pegado e que só apareceram com o tempo.
 
 	d) Exemplos de detalhes técnicos:
 	  - mudança do i-node: dono e criador passaram de texto para números
