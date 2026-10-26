@@ -2,28 +2,32 @@ Declaração de uso de Inteligência Artificial
 
 RESUMO
 
-A IA foi usada para discutir as decisões, auxiliar e revisar a implementação, depurar o código e redigir a documentação. O planejamento de cada etapa foi discutido entre o grupo e a IA, e só seguia adiante o que o grupo aprovava pelos seus critérios (tríade CIA, menor privilégio, separação de tarefas e simplicidade).
+A IA foi usada para discutir as decisões, auxiliar e revisar a implementação, depurar o código e redigir a documentação. O planejamento partiu das ideias do grupo: ao apresentar o enunciado à IA, o grupo já dizia como pretendia resolver cada parte. A discussão refinou essas ideias e, ao final, a IA consolidou tudo em um planejamento. Só seguia adiante o que o grupo aprovava pelos seus critérios (tríade CIA, menor privilégio, separação de tarefas e simplicidade).
 
-A implementação partia do grupo: o grupo tentava implementar o que tinha sido decidido e, quando travava (por exemplo, em como usar o scrypt para gerar o hash), usava a IA como auxiliar. Ao final de cada etapa, antes de seguir para a próxima, o grupo revisava com a IA o que tinha implementado: a IA testava, apontava erros e reescrevia ou ajustava ("lapidava") os trechos, principalmente os mais complexos, para reduzir erros. Os trechos que a IA mais reescreveu estão listados no item 2a.
+A implementação partiu do grupo: todos os arquivos de código foram iniciados pelo grupo, e a maior parte de cada um foi escrita por ele. Nenhum arquivo foi iniciado pela IA ou feito inteiramente por ela. Quando o grupo travava (por exemplo, em como usar o scrypt para gerar o hash), usava a IA como auxiliar. Ao final de cada etapa, antes de seguir para a próxima, o grupo revisava com a IA o que tinha implementado, para fechar a etapa com confiança: a IA testava, apontava erros e ajustava ("lapidava") o código. Na maioria dos arquivos, esse ajuste foi só de forma (formatação, alinhamento e legibilidade); os poucos trechos em que a IA corrigiu de fato o conteúdo estão listados no item 2a.
 
 
 - 1. Planejamento e decisões de projeto
 
 	a) Planejamento e decisões
 
-	A IA foi usada para planejar o projeto e discutir cada decisão. Ela
+	A IA foi usada para planejar o projeto e discutir cada decisão. O grupo
+	apresentou o enunciado junto com as ideias que já tinha para cada parte
+	("nesta parte, pensamos em fazer assim; naquela, desse jeito"). A IA
 	leu o código existente, listou o que o enunciado exigia e, para cada
-	decisão que o grupo apresentava, apresentou as opções possíveis, as
-	vantagens, as desvantagens e uma recomendação. O grupo analisava, tirava
-	dúvidas, pedia alternativas, mudava ou rejeitava propostas e só então
-	aprovava.
+	ideia ou decisão que o grupo apresentava, apresentou as opções
+	possíveis, as vantagens, as desvantagens e uma recomendação. O grupo
+	analisava, tirava dúvidas, pedia alternativas, mudava ou rejeitava
+	propostas e só então aprovava. Ao final dessa conversa, a IA consolidou
+	o que tinha sido decidido em um planejamento.
 
 	A divisão do trabalho consistiu em 6 etapas principais
 	(usuários e senhas; controle de acesso; chmod/chown/chgrp; grupos e sudo;
 	revisão; testes automatizados).
-	A **forma** do planejamento foi proposta pela IA e aprovada pelo grupo.
-	Antes de cada etapa, o planejamento proposto pela IA, caso fosse aprovado,
-	era anotado em um relatório com regras definidas.
+	A **forma** do planejamento (a divisão em etapas) foi proposta pela IA e
+	aprovada pelo grupo; o conteúdo partiu das ideias do grupo.
+	Antes de cada etapa, o planejamento daquela etapa, depois de aprovado
+	pelo grupo, era anotado em um relatório com regras definidas.
 
 	Origem das ideias:
 
@@ -102,12 +106,20 @@ A implementação partia do grupo: o grupo tentava implementar o que tinha sido 
 
 	a) Escrita do código
 
-	O código foi escrito primeiro pelo grupo e depois revisado e lapidado
-	com a IA. Os trechos que a IA mais reescreveu foram:
-	  - fs/permissions.py, de forma geral (regra de permissão, formato do
-	    ls -l e leitura do modo do chmod);
-	  - fs/passwords.py, as funções _scrypt, hash_password e
-	    verify_password.
+	Todos os arquivos de código foram iniciados pelo grupo, e a maior
+	parte de cada um foi escrita por ele; nenhum foi iniciado pela IA ou
+	feito inteiramente por ela. Antes de seguir para a próxima etapa, o
+	grupo revisava e lapidava o código com a IA, para fechar a etapa com
+	confiança. Essa lapidação teve dois tipos de mudança:
+	  - de forma, em praticamente todos os arquivos: formatação,
+	    alinhamento e organização, para o código ficar mais agradável de
+	    ler. Não era correção: o código já fazia o que devia;
+	  - de conteúdo, só nos trechos abaixo, por dificuldade do grupo na
+	    implementação ou por erros que apareceram e foram corrigidos:
+	      - fs/permissions.py, tirando as regras de permissão, de forma geral 
+		(formato do ls -l e leitura do modo do chmod);
+	      - fs/passwords.py, as funções _scrypt, hash_password e
+	        verify_password.
 
 	Além disso, a IA foi usada para:
 	  - ajudar quando o grupo travava em alguma parte. Exemplo: "Como eu
