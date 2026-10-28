@@ -45,26 +45,34 @@ def _fmt_size(n: int) -> str:
     return f"{n:.1f}TB"
 
 
+# Pede uma senha.
 def _ask_password(prompt: str) -> str:
     # o getpass nao mostra o que a pessoa digita. Mas quando a entrada nao e
     # um terminal (comandos vindo de um arquivo, tipo nos testes
     # automatizados), nao tem tela pra esconder nada, entao a senha e lida
     # como uma linha normal
+    # Num terminal de vdd, usa o getpass: o q a pessoa digita ñ aparece na
+    # tela. Qd os comandos vêm de um arquivo (testes automatizados), lê como
+    # linha normal.
     if sys.stdin.isatty():
         return getpass.getpass(prompt)
     return input(prompt)
 
 
+# Pede uma senha NOVA (useradd, passwd, formatação do disco).
 def _ask_new_password(user: str) -> str:
     """Pede a senha nova duas vezes (pra pegar erro de digitacao) e nao
     aceita senha vazia."""
     for _ in range(MAX_LOGIN_ATTEMPTS):
+        # Pede 2x, pra pegar erro de digitação.
         first = _ask_password(f"Nova senha para {user}: ")
         second = _ask_password("Repita a nova senha: ")
+        # As duas ñ batem -> tenta de novo (até 3x).
         if first != second:
             print("As senhas não conferem.")
             continue
         try:
+            # Usa a msm regra do kernel (ñ aceita senha vazia).
             Accounts.check_password(first)  # a mesma regra do kernel, sem repetir codigo
         except FSError as exc:
             print(exc)
@@ -78,6 +86,8 @@ class Shell:
         self.disk_path = disk_path
         self.fs = self._open_disk()
 
+    # Abre o disco: se o arquivo existe, monta; se ñ, pede a senha do root e
+    # formata um disco novo de 128 MB.
     def _open_disk(self) -> FileSystem:
         if os.path.exists(self.disk_path):
             fs = FileSystem(self.disk_path)
@@ -90,6 +100,8 @@ class Shell:
         print("Disco criado e formatado. Entre como root para criar os usuários.")
         return fs
 
+    # O ciclo do programa inteiro: tela de login -> sessão de comandos.
+    # 'logout' volta pro login; 'exit' fecha o programa.
     def run(self) -> None:
         print("Sistema de Arquivos baseado em i-nodes -- digite 'help' para ver os comandos.")
         while self._login():
@@ -98,9 +110,12 @@ class Shell:
         self.fs.close()
         print("Disco desmontado. Dados persistidos em", self.disk_path)
 
+    # A tela de login.
     def _login(self) -> bool:
         """Tela de login. Devolve False se a entrada acabou ou se as
         tentativas acabaram (ai o programa fecha)."""
+        # Até 3 tentativas. O limite é por execução do programa, ñ por conta:
+        # reabrindo, ganha mais 3.
         for _ in range(MAX_LOGIN_ATTEMPTS):
             try:
                 name = input("login: ").strip()
@@ -114,19 +129,29 @@ class Shell:
             # a mesma mensagem pra usuario que nao existe, senha errada ou
             # conta bloqueada: quem ta tentando entrar nao fica sabendo qual
             # dos tres foi
+            # Manda conferir nome e senha (cada conferência leva ~0,5 s por
+            # causa do scrypt).
             user = self.fs.accounts.login(name, password)
             if user is None:
+                # A msm msg pra usuário q ñ existe, senha errada ou conta
+                # bloqueada.
                 print("Login incorreto.")
                 continue
+            # Entrou: vai pra pasta pessoal.
             self._go_home()
             return True
+        # Errou 3x: o programa fecha.
         print("Número máximo de tentativas atingido.")
         return False
 
+    # A sessão de quem tá logado: um laço infinito q lê um comando, executa e
+    # volta a esperar o próximo. O shell ñ decide nada sozinho: só repassa pro
+    # kernel.
     def _session(self) -> str:
         """Laco de comandos de quem ta logado. Devolve EXIT ou LOGOUT."""
         while True:
             try:
+                # Mostra o prompt (ex.: ana@sofs:~$) e espera a pessoa digitar.
                 line = input(self._prompt())
             except EOFError:
                 print()
@@ -139,6 +164,9 @@ class Shell:
             if not line:
                 continue
             try:
+                # Quebra a linha em pedaços como um terminal faz (respeitando
+                # aspas): 'chmod 600 notas.txt' -> ['chmod', '600',
+                # 'notas.txt'].
                 lex = shlex.shlex(line, posix=True, punctuation_chars=">")
                 lex.whitespace_split = True
                 tokens = list(lex)
@@ -151,10 +179,16 @@ class Shell:
             try:
                 # o root pode ter editado o /etc/passwd, /etc/group... na mao
                 # no comando anterior, e o que vale e sempre o que ta no disco
+                # Relê as contas do disco (o root pode ter mudado algo no
+                # comando anterior).
                 self.fs.accounts.load()
+                # Manda o comando pro roteador (_dispatch), já trocando ~ pela
+                # home.
                 result = self._dispatch(tokens[0], self._expand_tilde(tokens[1:]))
                 if result in (EXIT, LOGOUT):
                     return result
+            # Se o kernel recusou (ex.: Permissão negada), mostra o erro e
+            # segue.
             except FSError as exc:
                 print(f"erro: {exc}")
             except KeyboardInterrupt:
@@ -170,15 +204,19 @@ class Shell:
             except Exception as exc:  # protecao extra durante demonstracao
                 print(f"erro inesperado: {exc}")
             finally:
+                # No fim de TODO comando, força a gravação no disco de vdd.
                 self.fs.flush()
 
+    # Quem tá logado agora (procura a conta pelo uid).
     def _current_user(self):
         return self.fs.accounts.user_by_uid(self.fs.uid)
 
+    # A pasta pessoal de quem tá logado ('/' se ñ achar a conta).
     def _home(self) -> str:
         user = self._current_user()
         return user.home if user else "/"
 
+    # 'Vai pra home': usado logo depois do login.
     def _go_home(self) -> None:
         try:
             self.fs.cd(self._home())
@@ -186,15 +224,25 @@ class Shell:
             print(f"aviso: home '{self._home()}' inacessível, iniciando em /")
             self.fs.cd("/")
 
+    # Monta o texto do prompt, tipo 'ana@sofs:~$'. Só lê informação, ñ muda
+    # nada.
     def _prompt(self) -> str:
+        # Quem: traduz o uid (número) pro nome.
         user = self.fs.accounts.user_name(self.fs.uid)
+        # Onde: transforma a pasta atual (guardada como nº de i-node) no
+        # caminho em texto.
         path = self.fs.path_of(self.fs.cwd_inode)
         home = self._home()
+        # Se tá na própria pasta pessoal ou dentro dela, troca esse começo por
+        # ~.
         if home != "/" and (path == home or path.startswith(home + "/")):
             path = "~" + path[len(home):]
+        # # pro root, $ pro resto.
         sign = "#" if self.fs.uid == ROOT_UID else "$"
         return f"{user}@sofs:{path}{sign} "
 
+    # Troca ~ e ~/... pelo caminho da home, pq o kernel ñ entende ~ (igual o
+    # bash faz).
     def _expand_tilde(self, args):
         # igual no bash: "~" e "~/..." viram a home de quem ta logado
         home = self._home().rstrip("/")
@@ -207,6 +255,8 @@ class Shell:
             out.append(a)
         return out
 
+    # O 'roteador': olha o nome do comando e chama a função certa do kernel. Ñ
+    # confere permissão nenhuma: quem decide é sempre o kernel.
     def _dispatch(self, cmd, args):
         fs = self.fs
 
@@ -285,12 +335,14 @@ class Shell:
         elif cmd == "reset":
             return self._reset()
 
+        # chmod <modo> <arquivos...> -> chama o fs.chmod p/ cada arquivo.
         elif cmd == "chmod":
             if len(args) < 2:
                 raise FSError("uso: chmod <modo> <arquivo...>  (ex.: chmod 640 a.txt, chmod o-r a.txt)")
             for p in args[1:]:
                 fs.chmod(p, args[0])
 
+        # 'ana' = só dono, 'ana:alunos' = dono e grupo, ':alunos' = só grupo.
         elif cmd == "chown":
             if len(args) < 2:
                 raise FSError("uso: chown <dono>[:<grupo>] <arquivo...>  ou  chown :<grupo> <arquivo...>")
@@ -342,6 +394,9 @@ class Shell:
             fs.accounts.remove_from_group(args[1], args[2])
             print(f"Removendo {args[1]} do grupo {args[2]}")
 
+        # sudo: pede a senha de quem tá logado e abre o 'with
+        # accounts.sudo(...)'. Lá dentro chama o próprio _dispatch c/ o resto
+        # do comando, agora como root.
         elif cmd == "sudo":
             if not args:
                 raise FSError("uso: sudo <comando> [argumentos]")
@@ -392,8 +447,12 @@ class Shell:
         else:
             print(" ".join(args))
 
+    # Monta o fluxo do passwd na tela: -l/-u (bloquear/desbloquear), trocar a
+    # própria senha ou a de outra pessoa (só root). Quem decide de vdd é o
+    # change_password (accounts.py); aqui é só pra ñ pedir senha à toa.
     def _passwd(self, args) -> None:
         acc = self.fs.accounts
+        # passwd -l / -u: bloquear ou desbloquear uma conta.
         if args and args[0] in ("-l", "-u"):
             if len(args) != 2:
                 raise FSError("uso: passwd -l <usuário>  |  passwd -u <usuário>")
@@ -412,6 +471,8 @@ class Shell:
             # so evita pedir senha a toa quando a resposta ja vai ser "nao"
             if target != me:
                 raise FSError("passwd: Permissão negada")
+            # Usuário comum: pede a senha atual e confere antes de pedir a
+            # nova.
             current = _ask_password("Senha atual: ")
             if acc.authenticate(me, current) is None:
                 raise FSError("passwd: senha atual incorreta")
@@ -465,6 +526,9 @@ class Shell:
         print(f"  modificado em: {_fmt_time(inode.modified_at)}")
         print(f"  blocos usados: {len(blocks)} ({blocks})")
 
+    # Gera a linha 'seu acesso' do stat: o q quem tá logado pode fazer c/ esse
+    # arquivo e por quê. Usa o msm access_of do kernel, então mostra exatamente
+    # a regra q vale. É didático: o Linux ñ tem essa linha.
     def _my_access(self, inode) -> str:
         """O que quem ta logado pode fazer com esse i-node, e por qual classe
         -- usando a mesma regra que o kernel usa pra decidir, entao o que
@@ -494,10 +558,13 @@ class Shell:
         print(f"  i-nodes:            {u['used_inodes']}/{u['total_inodes']} usados "
               f"({u['free_inodes']} livres)")
 
+    # O reset: apaga td e formata um disco novo.
     def _reset(self):
         # apagar o disco de todo mundo e coisa de administrador (e o "A" da CIA:
         # disponibilidade)
+        # Só o root pode (apagar o disco de td mundo é coisa de administrador).
         self.fs.accounts.require_root("reset")
+        # Pede confirmação: tem q digitar 'sim'.
         answer = input("Isso apaga TODO o conteúdo do disco atual. Digite 'sim' para confirmar: ")
         if answer.strip().lower() != "sim":
             print("cancelado.")
