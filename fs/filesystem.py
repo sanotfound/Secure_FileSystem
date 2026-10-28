@@ -250,11 +250,8 @@ class FileSystem:
     # Troca quem tá usando o sistema. self.uid/self.gid são o 'crachá' atual:
     # td checagem de permissão olha pra eles. Chamada pelo login e pelo su.
     def set_credentials(self, uid: int, gid: int) -> None:
-        """Troca quem ta usando o sistema (login, su)."""
         self.uid = uid
         self.gid = gid
-        # o sudo olha esse contador pra saber se o comando que ele rodou foi
-        # um "su" (ai a troca fica) ou outra coisa (ai volta a ser quem era)
         # Conta qtas trocas de usuário já rolaram. O sudo usa isso pra saber se
         # o comando dele foi um 'su'.
         self.cred_changes += 1
@@ -265,13 +262,6 @@ class FileSystem:
     # interno do sistema.
     @contextmanager
     def as_root(self) -> Iterator[None]:
-        """Modo kernel: roda um trecho como root e depois volta pras
-        credenciais de antes -- mesmo se der erro no meio (por isso o finally).
-
-        So o codigo do proprio sistema usa isso, quando precisa mexer em
-        arquivo protegido: ex.: o login lendo o /etc/shadow, o useradd
-        gravando no /etc. Nenhum comando digitado no shell chega aqui.
-        """
         # Anota quem tá logado...
         saved = (self.uid, self.gid)
         # ...e vira root.
@@ -288,26 +278,17 @@ class FileSystem:
     # calculado de novo a cada checagem, por isso tirar alguém de um grupo
     # corta o acesso na hora.
     def group_ids(self) -> List[int]:
-        """Grupos de quem ta logado: o primario + os grupos em que a pessoa
-        foi colocada depois. A gente consulta isso a cada checagem (em vez de
-        guardar no login) pra uma mudanca de grupo valer na hora."""
         user = self.accounts.user_by_uid(self.uid)
         return self.accounts.group_ids_of(user) if user else [self.gid]
 
     # Atalho: pergunta pro effective_access (permissions.py) o q quem tá logado
     # pode fazer c/ esse arquivo.
     def access_of(self, inode: Inode) -> Tuple[str, int]:
-        """Em qual classe (root/dono/grupo/outros) quem ta logado cai nesse
-        i-node, e quais bits r/w valem pra ele."""
         return effective_access(inode, self.uid, self.group_ids())
 
     # O PONTO ÚNICO de checagem de leitura/escrita: td operação q precisa de r
     # ou w passa por aqui antes de fazer qq coisa.
     def _require(self, inode: Inode, want: int, label: str) -> None:
-        """Toda checagem de permissao passa por aqui. Se faltar o r ou o w que
-        foi pedido em `want`, para tudo com "<label>: Permissao negada" -- e
-        isso acontece antes de mexer em qualquer coisa no disco, pra nao
-        ficar nada pela metade."""
         # Descobre o q a pessoa pode fazer nesse arquivo (ex.: 10 = só ler).
         _, bits = self.access_of(inode)
         # Tem td q foi pedido? Ex.: pediu w (01) mas só tem r (10): 10 & 01 =
@@ -322,9 +303,6 @@ class FileSystem:
     # função.
     def set_attrs(self, num: int, owner_uid: Optional[int] = None,
                   gid: Optional[int] = None, perm: Optional[int] = None) -> None:
-        """Muda dono, grupo e/ou permissoes de um i-node sem checar nada --
-        so o kernel usa (ex.: entregar a home pro usuario no useradd). O
-        chmod/chown de verdade conferem as regras antes de chamar isso."""
         # Lê a ficha (i-node) do arquivo, troca só os campos q vieram e grava
         # de volta.
         inode = self.read_inode(num)
@@ -751,13 +729,9 @@ class FileSystem:
             inode = self.read_inode(cur)
             if inode.type != TYPE_DIR:
                 raise FSError(f"{part}: '{inode.name}' não é um diretório")
-            # procurar um nome dentro de um diretorio e "atravessar" ele, e
-            # pra isso precisa de r (aqui o r faz o papel do x do Linux).
-            # Ex.: pra chegar em /home/ana/x.txt precisa de r em /, em /home
-            # e em /home/ana
-            # Exige r na pasta atual antes de procurar o próximo nome. Sem r em
-            # /home/ana, vc ñ chega em nada lá dentro, msm sabendo o nome do
-            # arquivo.
+            # Exige r na pasta atual antes de procurar o próximo nome (aqui o r
+            # faz o papel do x do Linux). Sem r em /home/ana, vc ñ chega em
+            # nada lá dentro, msm sabendo o nome do arquivo.
             self._require(inode, PERM_R, self._path_prefix(path, parts, i))
             # Procura o nome dentro da pasta.
             target = self._dir_lookup(cur, part)
@@ -776,9 +750,6 @@ class FileSystem:
     # mostrando em q pasta a resolução travou.
     @staticmethod
     def _path_prefix(path: str, parts: List[str], i: int) -> str:
-        """Em qual diretorio a resolucao ta no passo i, so pra mensagem de
-        erro: resolvendo "/home/ana/x.txt" pode dar "/home/ana"; resolvendo
-        "x.txt", da "."."""
         prefix = "/".join(parts[:i])
         if path.startswith("/"):
             return "/" + prefix
@@ -813,8 +784,6 @@ class FileSystem:
             # sem isso, "touch arq/x" gravava entradas de diretorio dentro
             # dos blocos de dados de um arquivo comum e o corrompia
             raise FSError(f"{parent_path}: não é um diretório")
-        # quem chamou vai procurar `name` dentro do pai, e isso tambem e
-        # atravessar o pai -- ele faz parte do caminho, entao precisa de r
         # E exige r tb no próprio pai, pq a operação vai procurar ou criar o
         # nome lá dentro.
         self._require(parent, PERM_R, parent_path)
@@ -861,9 +830,6 @@ class FileSystem:
 
     # Monta a ficha (i-node) de um arquivo ou pasta nova.
     def _new_inode(self, itype: int, perm: int, name: str, now: float) -> Inode:
-        # quem cria vira dono e criador, e o grupo e o grupo primario de quem
-        # criou (regra do Linux). Como cada usuario tem um grupo so dele, o
-        # "grupo" de um arquivo novo e so o proprio dono: nasce privado
         return Inode(
             used=1, type=itype, perm=perm, name=name,
             # Quem criou vira dono e criador; o grupo é o grupo primário de
@@ -884,13 +850,12 @@ class FileSystem:
             inode = self.read_inode(num)
             # Já existe: mudar a data é mexer no arquivo, então precisa de w
             # nele.
-            self._require(inode, PERM_W, path)  # mudar a data ja e mexer no arquivo
+            self._require(inode, PERM_W, path)
             inode.modified_at = time.time()
             self.write_inode(num, inode)
             return num
 
         self._check_name(name)  # valida antes de gastar i-node
-        # criar arquivo e botar uma entrada nova no diretorio pai: w no pai
         # Arquivo novo: criar é colocar um nome novo dentro da pasta, então
         # precisa de w na PASTA PAI.
         self._require(self.read_inode(parent), PERM_W, path)
@@ -913,7 +878,7 @@ class FileSystem:
             inode = self.read_inode(num)
             if inode.type == TYPE_SYMLINK:
                 # Se o nome é um link, escreve no alvo.
-                num = self.resolve(path)  # escreve no destino, nao no link
+                num = self.resolve(path)
                 inode = self.read_inode(num)
             if inode.type == TYPE_DIR:
                 raise FSError(f"{name}: é um diretório")
@@ -921,7 +886,7 @@ class FileSystem:
             self._require(inode, PERM_W, path)
         else:
             # Ñ existe: cria pelo touch, q confere w na pasta pai.
-            num = self.touch(path)  # o touch ja confere o w no diretorio pai
+            num = self.touch(path)
 
         if append:
             self.append_data(num, content)
@@ -949,8 +914,6 @@ class FileSystem:
         inode = self.read_inode(num)
         if inode.type == TYPE_DIR:
             raise FSError(f"{name}: é um diretório (use rmdir)")
-        # apagar e tirar a entrada do diretorio pai, entao o que conta e o w
-        # no pai, nao no arquivo (igual no Linux)
         # Precisa de w na PASTA PAI, ñ no arquivo: apagar é tirar o nome de
         # dentro da pasta (igual Linux). Por isso usuário comum ñ apaga o
         # /etc/shadow: o /etc é só do root.
@@ -981,17 +944,12 @@ class FileSystem:
             pass
 
         created = not self._exists(dst_final)
-        # o write_file confere o w no destino (ou no diretorio pai, se for criar)
         # Cria/grava o destino pelo write_file (q confere w). Como quem cria é
-        # quem tá logado, a cópia é de QUEM COPIOU, ñ do dono do original.
+        # quem tá logado, a cópia é de QUEM COPIOU, ñ do dono do original (se
+        # ficasse c/ o dono do original, dava pra criar arquivo no nome dos
+        # outros).
         num = self.write_file(dst_final, data, append=False)
         if created:
-            # copia nova: pega as permissoes do original, mas limitadas pelo
-            # padrao (E bit a bit), entao nunca fica mais aberta que o
-            # original: 600 continua 600, 644 vira 640. Dono e grupo sao de
-            # quem copiou, porque foi ele que o write_file usou pra criar
-            # (se mantivesse o dono do original, dava pra criar arquivo no
-            # nome dos outros)
             # Cópia nova: pega as permissões do original 'E' 640, então nasce
             # no máx tão aberta qto o original (600 continua 600; 644 vira
             # 640).
@@ -1015,11 +973,6 @@ class FileSystem:
         if dst_parent is None:
             dst_parent, dst_name = self.split_parent(dst)
 
-        # mover tira o nome de um diretorio e bota em outro, entao mexe nos
-        # dois. No destino precisa de r tambem, pra procurar o nome la
-        # dentro. E isso tem que vir antes do "ja existe": senao a resposta
-        # (existe / nao existe) entregaria o que tem dentro de um diretorio
-        # que a pessoa nem pode ler
         # Precisa de w na pasta de onde sai...
         self._require(self.read_inode(src_parent), PERM_W, src)
         # ...e de r+w na pasta pra onde vai. Isso é conferido ANTES de dizer
@@ -1054,9 +1007,6 @@ class FileSystem:
         if self._dir_lookup(parent, name) is not None:
             raise FSError(f"{name}: já existe")
         self._check_name(name)
-        # aqui so o pai e conferido: criar link pra qualquer coisa nao da
-        # acesso a ela, porque quem segue o link cai na checagem do alvo
-        # (ex.: link pro /etc/shadow pode, mas o cat nele da Permissao negada)
         # Só exige w na pasta onde o link vai ficar. Criar link pro shadow
         # pode, mas qd alguém segue o link cai na checagem do alvo e dá
         # Permissão negada.
@@ -1143,7 +1093,7 @@ class FileSystem:
         if inode.type != TYPE_DIR:
             raise FSError(f"{path}: não é um diretório")
         # Precisa de r (entrar = atravessar).
-        self._require(inode, PERM_R, path)  # entrar no diretorio = atravessar, precisa de r
+        self._require(inode, PERM_R, path)
         self.cwd_inode = num
 
     # ---- chmod, chown, chgrp ----
@@ -1162,9 +1112,7 @@ class FileSystem:
         inode = self.read_inode(num)
         # Calcula a permissão nova a partir do q foi digitado. Modo inválido dá
         # erro aqui, antes de mexer em qq coisa.
-        new_perm = parse_mode(mode, inode.perm)  # modo invalido da erro antes de tudo
-        # so o dono (ou o root) mexe nas permissoes: e o dono que decide
-        # quem pode ler e escrever no que e dele
+        new_perm = parse_mode(mode, inode.perm)
         # Só o DONO ou o root podem. A msg é 'Operação não permitida' (e ñ
         # 'Permissão negada') pq aqui a regra é QUEM vc é, ñ q bits vc tem.
         if self.uid != ROOT_UID and inode.owner_uid != self.uid:
@@ -1175,16 +1123,11 @@ class FileSystem:
 
     # O chown: troca o dono (e/ou o grupo) de um arquivo.
     def chown(self, path: str, owner: Optional[str], group: Optional[str]) -> None:
-        # pega os numeros antes, pra um nome errado dar "nao existe" sem
-        # mexer em nada
         # Converte os nomes digitados nos números (UID/GID). Nome q ñ existe dá
         # erro aqui, sem mexer em nada.
         uid = self.accounts.get_user(owner).uid if owner else None
         gid = self.accounts.get_group(group).gid if group else None
         num = self.resolve(path)
-        # trocar o dono e so do root, igual no Linux: senao a ana podia
-        # "dar" um arquivo pro bruno (pra incriminar ele, ou deixar com ele
-        # uma coisa que ele nem controla)
         # SÓ o root pode. Pq: senão a ana podia 'dar' um arquivo pro bruno, pra
         # incriminar ele ou deixar c/ ele algo q ele ñ controla.
         if self.uid != ROOT_UID:
@@ -1198,9 +1141,6 @@ class FileSystem:
         gid = self.accounts.get_group(group).gid
         num = self.resolve(path)
         inode = self.read_inode(num)
-        # o root pode tudo; o dono so pode passar o arquivo pra um grupo do
-        # qual ele faz parte. Senao dava pra "jogar" arquivo num grupo alheio,
-        # ex.: fazer um arquivo aparecer como sendo do grupo rh
         # Root pode td. Usuário comum: tem q ser o dono E fazer parte do grupo
         # de destino. Assim ninguém 'joga' arquivo num grupo do qual ñ faz
         # parte.

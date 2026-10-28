@@ -47,10 +47,6 @@ def _fmt_size(n: int) -> str:
 
 # Pede uma senha.
 def _ask_password(prompt: str) -> str:
-    # o getpass nao mostra o que a pessoa digita. Mas quando a entrada nao e
-    # um terminal (comandos vindo de um arquivo, tipo nos testes
-    # automatizados), nao tem tela pra esconder nada, entao a senha e lida
-    # como uma linha normal
     # Num terminal de vdd, usa o getpass: o q a pessoa digita ñ aparece na
     # tela. Qd os comandos vêm de um arquivo (testes automatizados), lê como
     # linha normal.
@@ -61,8 +57,6 @@ def _ask_password(prompt: str) -> str:
 
 # Pede uma senha NOVA (useradd, passwd, formatação do disco).
 def _ask_new_password(user: str) -> str:
-    """Pede a senha nova duas vezes (pra pegar erro de digitacao) e nao
-    aceita senha vazia."""
     for _ in range(MAX_LOGIN_ATTEMPTS):
         # Pede 2x, pra pegar erro de digitação.
         first = _ask_password(f"Nova senha para {user}: ")
@@ -73,7 +67,7 @@ def _ask_new_password(user: str) -> str:
             continue
         try:
             # Usa a msm regra do kernel (ñ aceita senha vazia).
-            Accounts.check_password(first)  # a mesma regra do kernel, sem repetir codigo
+            Accounts.check_password(first)
         except FSError as exc:
             print(exc)
             continue
@@ -112,8 +106,6 @@ class Shell:
 
     # A tela de login.
     def _login(self) -> bool:
-        """Tela de login. Devolve False se a entrada acabou ou se as
-        tentativas acabaram (ai o programa fecha)."""
         # Até 3 tentativas. O limite é por execução do programa, ñ por conta:
         # reabrindo, ganha mais 3.
         for _ in range(MAX_LOGIN_ATTEMPTS):
@@ -126,9 +118,6 @@ class Shell:
             except KeyboardInterrupt:
                 print()
                 continue
-            # a mesma mensagem pra usuario que nao existe, senha errada ou
-            # conta bloqueada: quem ta tentando entrar nao fica sabendo qual
-            # dos tres foi
             # Manda conferir nome e senha (cada conferência leva ~0,5 s por
             # causa do scrypt).
             user = self.fs.accounts.login(name, password)
@@ -148,7 +137,6 @@ class Shell:
     # volta a esperar o próximo. O shell ñ decide nada sozinho: só repassa pro
     # kernel.
     def _session(self) -> str:
-        """Laco de comandos de quem ta logado. Devolve EXIT ou LOGOUT."""
         while True:
             try:
                 # Mostra o prompt (ex.: ana@sofs:~$) e espera a pessoa digitar.
@@ -177,8 +165,6 @@ class Shell:
                 continue
 
             try:
-                # o root pode ter editado o /etc/passwd, /etc/group... na mao
-                # no comando anterior, e o que vale e sempre o que ta no disco
                 # Relê as contas do disco (o root pode ter mudado algo no
                 # comando anterior).
                 self.fs.accounts.load()
@@ -244,7 +230,6 @@ class Shell:
     # Troca ~ e ~/... pelo caminho da home, pq o kernel ñ entende ~ (igual o
     # bash faz).
     def _expand_tilde(self, args):
-        # igual no bash: "~" e "~/..." viram a home de quem ta logado
         home = self._home().rstrip("/")
         out = []
         for a in args:
@@ -346,7 +331,6 @@ class Shell:
         elif cmd == "chown":
             if len(args) < 2:
                 raise FSError("uso: chown <dono>[:<grupo>] <arquivo...>  ou  chown :<grupo> <arquivo...>")
-            # "ana" so dono, "ana:alunos" dono e grupo, ":alunos" so grupo
             owner, sep, group = args[0].partition(":")
             if (sep and not group) or not (owner or group):
                 raise FSError("uso: chown <dono>[:<grupo>] <arquivo...>  ou  chown :<grupo> <arquivo...>")
@@ -467,8 +451,6 @@ class Shell:
         target = args[0] if args else me
         current = None
         if self.fs.uid != ROOT_UID:
-            # quem decide de verdade e o kernel (change_password); isso aqui
-            # so evita pedir senha a toa quando a resposta ja vai ser "nao"
             if target != me:
                 raise FSError("passwd: Permissão negada")
             # Usuário comum: pede a senha atual e confere antes de pedir a
@@ -530,9 +512,6 @@ class Shell:
     # arquivo e por quê. Usa o msm access_of do kernel, então mostra exatamente
     # a regra q vale. É didático: o Linux ñ tem essa linha.
     def _my_access(self, inode) -> str:
-        """O que quem ta logado pode fazer com esse i-node, e por qual classe
-        -- usando a mesma regra que o kernel usa pra decidir, entao o que
-        aparece aqui e o que vale de verdade."""
         if inode.type == TYPE_SYMLINK:
             return "vale a permissão do alvo (link não tem permissão própria)"
         cls, bits = self.fs.access_of(inode)
@@ -560,9 +539,8 @@ class Shell:
 
     # O reset: apaga td e formata um disco novo.
     def _reset(self):
-        # apagar o disco de todo mundo e coisa de administrador (e o "A" da CIA:
-        # disponibilidade)
-        # Só o root pode (apagar o disco de td mundo é coisa de administrador).
+        # Só o root pode (apagar o disco de td mundo é coisa de administrador,
+        # é o 'A' da CIA: disponibilidade).
         self.fs.accounts.require_root("reset")
         # Pede confirmação: tem q digitar 'sim'.
         answer = input("Isso apaga TODO o conteúdo do disco atual. Digite 'sim' para confirmar: ")

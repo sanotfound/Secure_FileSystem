@@ -87,13 +87,6 @@ class Accounts:
     # e groups. Roda antes de td comando, pq o root pode ter editado algum
     # desses arquivos na mão, e o q vale é sempre o q tá no disco.
     def load(self) -> None:
-        """Le passwd, shadow e group do disco pras tabelas em memoria.
-
-        O shell chama isso antes de cada comando, porque o root pode ter
-        editado um desses arquivos na mao (ex.: echo >> /etc/group) e o que
-        vale e sempre o que ta no disco. Linha mal formada e so ignorada, pra
-        nao derrubar o sistema por causa de uma linha torta.
-        """
         # Vira root por um instante, pq o shadow é 600 e quem tá logado
         # normalmente ñ poderia ler.
         with self.fs.as_root():
@@ -124,7 +117,7 @@ class Accounts:
             text = self.fs.read_file(path).decode("utf-8", errors="replace")
         except FSError:
             # Arquivo apagado: segue sem essas contas em vez de travar.
-            return []  # arquivo apagado: fica sem essas contas, igual no Linux
+            return []
         # Quebra em linhas, pula vazias e comentários (#), e quebra cada linha
         # nos ':'. Ex.: 'ana:x:1000:1000:/home/ana' vira ['ana', 'x', '1000',
         # '1000', '/home/ana'].
@@ -153,9 +146,6 @@ class Accounts:
         with self.fs.as_root():
             # Grava o texto novo por cima do antigo (em modo root).
             num = self.fs.write_file(path, self._render(path), append=False)
-            # sempre root:root e com a permissao padrao do arquivo, mesmo se
-            # alguem tiver apagado ele e o write_file tiver criado de novo --
-            # assim o shadow nunca fica aberto
             # E SEMPRE devolve o arquivo pra root:root c/ a permissão certa
             # (shadow 600, os outros 644). Assim, msm se alguém apagar o shadow
             # e ele for recriado, já nasce fechado.
@@ -168,12 +158,6 @@ class Accounts:
 
     # Grava vários arquivos de contas em sequência, no esquema 'tudo ou nada'.
     def _save(self, paths: List[str], backup) -> None:
-        """Grava os arquivos na ordem que vieram, tudo ou nada.
-
-        Se o disco encher no meio, desfaz: o arquivo que deu erro ja ficou
-        como tava (o write_data e tudo ou nada), entao so precisa voltar os
-        que ja tinham sido gravados antes dele.
-        """
         written: List[str] = []
         try:
             # Grava um por um e anota quais já foram.
@@ -258,9 +242,6 @@ class Accounts:
     # controlado.
     @staticmethod
     def check_password(password: str) -> None:
-        # sem regra de tamanho nem de simbolo (ambiente controlado, aqui nao
-        # faz diferenca); so nao aceita senha vazia, pra um Enter sem querer
-        # nao deixar a conta sem senha
         if not password:
             raise FSError("a senha não pode ser vazia")
 
@@ -289,8 +270,6 @@ class Accounts:
     # Roda só uma vez, qd o disco é formatado: cria as contas q já nascem c/ o
     # sistema.
     def initialize(self, root_password: str) -> None:
-        """Contas que ja nascem na formatacao: o usuario root, os grupos root
-        e sudo e o /etc/sudoers padrao."""
         # Cria o usuário root (uid 0), c/ a senha definida na formatação já
         # transformada em hash.
         self.users = {"root": User("root", ROOT_UID, ROOT_GID, "/root")}
@@ -310,9 +289,6 @@ class Accounts:
     # e passwd). Devolve a pessoa se td bate, ou None se ñ bate, SEM contar o
     # motivo.
     def authenticate(self, name: str, password: str) -> Optional[User]:
-        """Confere usuario e senha. Devolve None se o usuario nao existe, se a
-        senha ta errada ou se a conta ta bloqueada -- sem dizer qual dos tres,
-        e demorando o mesmo tempo nos tres casos."""
         # Relê as contas do disco antes de conferir.
         self.load()
         # Busca a pessoa pelo nome e o texto dela no shadow. O .get devolve
@@ -340,7 +316,6 @@ class Accounts:
 
     # O comando su: trocar de usuário sem sair do programa.
     def switch_user(self, name: str, password: Optional[str]) -> User:
-        """su: troca o usuario atual. O root troca sem senha, igual no Linux."""
         # Quem pede é o root? Troca direto, sem senha (igual Linux).
         if self.fs.uid == ROOT_UID:
             user = self.get_user(name)
@@ -358,8 +333,6 @@ class Accounts:
     # Fica separado do useradd pq o shell chama ela ANTES de pedir a senha, pra
     # pessoa ñ digitar senha à toa se o pedido vai ser recusado.
     def check_useradd(self, name: str) -> None:
-        """Tudo que o useradd confere antes de criar a conta. O shell chama
-        isso antes de pedir a senha, pra pessoa nao digitar senha a toa."""
         self.require_root("useradd")
         self.check_name(name)
         if name in self.users or name in self.groups:
@@ -373,7 +346,6 @@ class Accounts:
         # Escolhe o número do usuário (UID): o 1º livre a partir de 1000.
         uid = self._free_id(u.uid for u in self.users.values())
         group_ids = {g.gid for g in self.groups.values()}
-        # grupo proprio com o mesmo numero do usuario, se esse numero tiver livre
         # O grupo próprio ganha o msm número, se tiver livre.
         gid = uid if uid not in group_ids else self._free_id(group_ids)
         user = User(name, uid, gid, f"/home/{name}")
@@ -394,8 +366,6 @@ class Accounts:
         self.hashes[name] = hashed
         self.groups[name] = Group(name, gid)
         try:
-            # shadow antes do passwd: assim nunca fica um usuario no passwd
-            # sem senha no shadow
             # Grava shadow, group e passwd nessa ordem. O shadow vem 1º pra
             # nunca existir usuário no passwd sem senha no shadow.
             self._save([SHADOW_PATH, GROUP_PATH, PASSWD_PATH], backup)
@@ -409,8 +379,6 @@ class Accounts:
     # O comando passwd: trocar uma senha.
     def change_password(self, name: str, new_password: str,
                         current_password: Optional[str] = None) -> None:
-        """passwd: o usuario troca a propria senha dizendo a atual; o root
-        troca a de qualquer um sem precisar da atual."""
         user = self.get_user(name)
         # Quem pede ñ é root? Aí tem regras: só pode trocar a PRÓPRIA senha e
         # tem q acertar a senha atual.
@@ -449,11 +417,8 @@ class Accounts:
     # compartilha arquivo c/ um grupo, ou q se dá sudo pra alguém (usermod -aG
     # sudo ana).
     def add_to_groups(self, user_name: str, group_names: List[str]) -> None:
-        """usermod -aG: coloca o usuario em um ou mais grupos."""
         self.require_root("usermod")
         self.get_user(user_name)
-        # confere se TODOS os grupos existem antes de mexer em qualquer um:
-        # "usermod -aG alunos,naoexiste ana" nao pode deixar a ana so no alunos
         # Confere se TODOS os grupos existem antes de mexer em qq um. Se um ñ
         # existir, dá erro aqui e nada muda.
         groups = [self.get_group(g) for g in group_names]
@@ -467,15 +432,13 @@ class Accounts:
     # O gpasswd -d: tira alguém de um grupo (só root). O efeito é na hora: se a
     # pessoa lia algo pelo grupo, na próxima tentativa já ñ lê.
     def remove_from_group(self, user_name: str, group_name: str) -> None:
-        """gpasswd -d: tira o usuario de um grupo."""
         self.require_root("gpasswd")
         user = self.get_user(user_name)
         group = self.get_group(group_name)
         # Ñ deixa tirar alguém do próprio grupo primário (o grupo q tem o msm
-        # nome da pessoa).
+        # nome da pessoa). Ele fica no passwd, ñ na lista de membros, e sem ele
+        # os arquivos novos da pessoa iam ficar sem o grupo dela.
         if group.gid == user.gid:
-            # o grupo primario fica no passwd, nao na lista de membros -- e
-            # sem ele os arquivos novos da pessoa iam ficar sem grupo dela
             raise FSError(f"gpasswd: '{group_name}' é o grupo primário de {user_name}, não dá pra tirar")
         if user_name not in group.members:
             raise FSError(f"gpasswd: {user_name} não é membro de '{group_name}'")
@@ -489,9 +452,6 @@ class Accounts:
     # Lê o /etc/sudoers e devolve a lista de quem pode usar sudo, tipo
     # ['%sudo', 'bruno']. Só lê, ñ decide nada.
     def _sudoers_entries(self) -> List[str]:
-        # uma entrada por linha: "ana" (usuario) ou "%sudo" (grupo). So a
-        # primeira palavra conta, entao uma linha no formato do Linux
-        # ("ana ALL=(ALL) ALL") tambem funciona
         # Vira root por um instante, pq o sudoers é 600.
         with self.fs.as_root():
             try:
@@ -499,7 +459,7 @@ class Accounts:
             except FSError:
                 # Sem arquivo -> lista vazia -> ninguém usa sudo. Na dúvida,
                 # nega.
-                return []  # sem sudoers, ninguem usa sudo
+                return []
         entries = []
         for line in text.splitlines():
             line = line.strip()
@@ -532,17 +492,9 @@ class Accounts:
     # <roda o comando>'.
     @contextmanager
     def sudo(self, password: Optional[str]) -> Iterator[None]:
-        """Roda UM comando como root, se a pessoa provar quem e e estiver no
-        sudoers. Uso: `with accounts.sudo(senha): <roda o comando>`.
-
-        A ordem e a do Linux: primeiro a senha (da propria pessoa, nao a do
-        root), depois o sudoers. O root nao precisa de nada.
-        """
         # ANTES do comando (o root ñ precisa de nada disso):
         if self.fs.uid != ROOT_UID:
             me = self.user_by_uid(self.fs.uid)
-            # o authenticate e o mesmo do login, entao conta bloqueada tambem
-            # nao passa aqui
             # 1) prova q é vc msm: confere a SUA senha. Conta bloqueada tb
             # falha aqui.
             if me is None or self.authenticate(me.name, password or "") is None:
@@ -560,9 +512,6 @@ class Accounts:
             # Aqui o comando roda, já como root.
             yield
         finally:
-            # volta a ser quem era, mesmo se o comando deu erro. A excecao e
-            # quando o proprio comando trocou de usuario ("sudo su", "sudo su
-            # bruno"): ai a troca era justamente o que a pessoa queria
             # DEPOIS (o finally roda msm se o comando deu erro): volta a ser
             # quem era. Só ñ volta se o próprio comando trocou de usuário
             # ('sudo su'), pq aí a troca era o objetivo.
@@ -572,9 +521,6 @@ class Accounts:
     # O passwd -l / -u: bloqueia ou desbloqueia uma conta (só root). É o jeito
     # de cortar o acesso de alguém, já q ñ existe userdel.
     def set_locked(self, name: str, locked: bool) -> None:
-        """passwd -l / passwd -u: bloqueia ou desbloqueia a conta. O hash
-        continua guardado (so ganha um "!" na frente), entao desbloquear volta
-        a mesma senha de antes."""
         self.require_root("passwd -l" if locked else "passwd -u")
         self.get_user(name)
         # Ñ deixa bloquear o root, senão o sistema ficava sem administrador.

@@ -34,9 +34,6 @@ def _scrypt(password: str, salt: bytes, log2_n: int, r: int, p: int) -> bytes:
     # O shadow guarda só o expoente (17). Aqui vira o número de vdd: 2^17 =
     # 131.072 blocos q o scrypt vai montar na memória.
     n = 1 << log2_n
-    # o scrypt usa uns 128*r*N bytes de memoria (128 MiB com os nossos
-    # parametros), so que o OpenSSL trava em 32 MiB se a gente nao liberar
-    # mais. Liberamos o dobro do necessario pra ter folga
     # Cada bloco tem 128*r = 1024 bytes, então a tabela inteira dá 128 MiB. O
     # OpenSSL (q faz o scrypt por baixo) trava em 32 MiB por padrão, por isso a
     # gente libera o dobro do necessário.
@@ -51,8 +48,6 @@ def _scrypt(password: str, salt: bytes, log2_n: int, r: int, p: int) -> bytes:
 # Usada qd uma senha é CRIADA ou TROCADA (useradd, passwd). Transforma a senha
 # num texto q pode ser guardado no /etc/shadow sem revelar a senha.
 def hash_password(password: str) -> str:
-    # o secrets usa o gerador aleatorio do sistema operacional, que serve pra
-    # criptografia. O modulo random nao serve pra salt: ele e previsivel
     # Sorteia 16 bytes aleatórios: o salt. Cada usuário ganha um diferente,
     # então duas pessoas c/ a msm senha ficam c/ hashes diferentes. Usa
     # 'secrets' (ñ 'random') pq o random dá pra prever.
@@ -85,7 +80,7 @@ def verify_password(password: str, stored: str) -> bool:
         log2_n, r, p = int(log2_n), int(r), int(p)
     # Linha corrompida: recusa, mas gastando o msm tempo de sempre.
     except ValueError:
-        waste_time(password)  # linha corrompida: falha, mas no mesmo tempo de sempre
+        waste_time(password)
         return False
     # Refaz a conta c/ a senha digitada e o salt guardado. Se a senha for a
     # certa, sai exatamente o msm hash.
@@ -104,12 +99,6 @@ def verify_password(password: str, stored: str) -> bool:
 # digitado ñ existe: se a resposta viesse na hora, dava pra descobrir quais
 # contas existem só medindo o tempo.
 def waste_time(password: str) -> None:
-    """Gasta o mesmo tempo de uma verificacao de verdade, sem comparar nada.
-
-    Serve pro login de usuario que nao existe: sem isso a resposta vinha na
-    hora (em vez de ~0,6 s) e dava pra descobrir quais contas existem so
-    olhando o tempo.
-    """
     # Um scrypt c/ salt de zeros, só pra gastar tempo; o resultado é jogado
     # fora.
     _scrypt(password, bytes(SALT_SIZE), SCRYPT_LOG2_N, SCRYPT_R, SCRYPT_P)
